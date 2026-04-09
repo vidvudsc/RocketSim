@@ -1,0 +1,1728 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Browser Rocket Point-Fly Sim</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #101218; font-family: monospace; user-select: none; }
+        canvas { display: block; }
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
+        .panel { background: rgba(0, 0, 0, 0.5); backdrop-filter: blur(8px); border-radius: 12px; pointer-events: auto; }
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+
+    <!-- UI Overlay -->
+    <div id="ui-layer" class="p-4 text-white">
+        <div class="panel p-4 w-96 border border-white/10 shadow-lg">
+            <h1 class="text-xl font-bold mb-3 text-gray-100">Rocket Sim WebGL</h1>
+            
+            <div class="grid grid-cols-3 gap-2 mb-2 text-sm text-blue-200">
+                <div id="ui-thr">Thr 0%</div>
+                <div id="ui-gx">Gx 0.0°</div>
+                <div id="ui-gz">Gz 0.0°</div>
+            </div>
+            
+            <div class="grid grid-cols-3 gap-2 mb-2 text-sm text-blue-200">
+                <div id="ui-alt">Alt 0.00 m</div>
+                <div id="ui-air">Air 0.00 m/s</div>
+                <div id="ui-rho">rho 1.225</div>
+            </div>
+
+            <div id="ui-vel" class="text-sm mb-1 text-blue-300">Vel (0.00, 0.00, 0.00)</div>
+            <div id="ui-rate" class="text-sm mb-3 text-blue-300">Rate (0.00, 0.00, 0.00)</div>
+            <div id="ui-target" class="text-sm mb-3 text-red-300">Target OFF</div>
+            <div id="ui-gnc" class="text-xs mb-3 text-cyan-200">GNC --</div>
+            
+            <div id="help-text" class="text-xs text-orange-200 space-y-1 mb-3">
+                <p>Q/E manual throttle &nbsp; Arrow keys manual gimbal</p>
+                <p>T auto target &nbsp; N next plane &nbsp; Y center</p>
+                <p>Z cut &nbsp; P pause &nbsp; R reset</p>
+                <p>LMB orbit &nbsp; RMB pan &nbsp; Wheel zoom</p>
+                <p>WASD/SPACE/SHIFT pan (free cam mode)</p>
+                <p>C follow rocket (tracking mode)</p>
+            </div>
+            
+            <div class="flex justify-between items-center text-xs font-bold">
+                <span id="ui-status">TAB: toggle help</span>
+                <span id="ui-cam" class="text-green-400">Cam: Follow</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Three.js and OrbitControls -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+
+    <script>
+        // Math Constants & Utils
+        const FIXED_DT = 1.0 / 240.0;
+        const MAX_FRAME_DT = 0.05;
+        const GIMBAL_LIMIT_DEG = 8.0;
+        const GIMBAL_RATE_DEG = 45.0;
+        const DEG2RAD = Math.PI / 180.0;
+        const RAD2DEG = 180.0 / Math.PI;
+        const LAUNCH_PAD_X = 220.0;
+        const LAUNCH_PAD_Z = 260.0;
+        const LAUNCH_PAD_RADIUS = 15.0;
+        const LAUNCH_PAD_HEIGHT = 0.65;
+        const LAUNCH_PAD_CLEARANCE = 7.5;
+        const WORLD_RADIUS = 3600.0;
+        const TERRAIN_SIZE = 8000.0;
+        const TERRAIN_SEGMENTS = 220;
+        const FLAT_LAUNCH_RADIUS = 25.0;
+        const FLAT_TRANSITION_RADIUS = 50.0;
+        const TARGET_PREDICTION_HZ = 240.0;
+        const TARGET_INTERCEPT_SPEED_MIN = 40.0;
+        const TARGET_INTERCEPT_SPEED_MAX = 220.0;
+        const TARGET_INTERCEPT_TIME_MAX = 5.0;
+        const TARGET_NAV_GAIN = 1.6;
+        const TARGET_PN_ACCEL_FRACTION = 0.35;
+        const TARGET_ERROR_LIMIT = 0.75;
+        const TARGET_INTEGRAL_LIMIT = 0.40;
+        const TARGET_TERMINAL_RANGE = 560.0;
+        const TARGET_TERMINAL_EXIT_RANGE = 760.0;
+        const BOOST_CLEAR_ALT = 36.0;
+        const BOOST_CLEAR_SPEED = 42.0;
+        const BOOST_VERTICAL_LEAD = 70.0;
+        const BOOST_DOWNRANGE_LEAD = 18.0;
+        const BOOST_GIMBAL_LIMIT_SCALE = 0.25;
+        const CANARD_ENABLE_SPEED = 64.0;
+        const GNC_LOFT_START_RANGE = 1400.0;
+        const GNC_LOFT_FULL_RANGE = 2400.0;
+        const GNC_LOFT_MAX = 14.0;
+        const GNC_TERMINAL_TIME = 3.0;
+        const GNC_TERMINAL_EXIT_TIME = 3.8;
+        const GNC_MIDCOURSE_TIME = 4.0;
+        const GNC_GIMBAL_KP_MID = 1.05;
+        const GNC_GIMBAL_KP_TERM = 1.35;
+        const GNC_GIMBAL_KD_MID = 0.13;
+        const GNC_GIMBAL_KD_TERM = 0.16;
+        const GNC_RATE_KP_BOOST = 0.22;
+        const GNC_RATE_KP_MID = 0.20;
+        const GNC_RATE_KP_TERM = 0.18;
+        const GNC_RATE_LIMIT_BOOST = 0.55;
+        const GNC_RATE_LIMIT_MID = 0.90;
+        const GNC_RATE_LIMIT_TERM = 1.35;
+        const GNC_SURFACE_BLEND_START = 46.0;
+        const GNC_SURFACE_BLEND_END = 120.0;
+        const GNC_GUIDANCE_TURN_RATE = 2.2;
+        const GNC_MIDCOURSE_VEL_TAU = 1.8;
+        const GNC_TERMINAL_VEL_TAU = 0.95;
+        const GNC_MIDCOURSE_AXIAL_ACCEL = 8.5;
+        const GNC_TERMINAL_AXIAL_ACCEL = 4.5;
+        const GNC_TERRAIN_ESCAPE_ACCEL = 7.0;
+        const GNC_DIRECT_BLEND_NEAR = 140.0;
+        const GNC_DIRECT_BLEND_FAR = 720.0;
+        const GNC_SPEED_BRAKE_NEAR = 120.0;
+        const GNC_SPEED_BRAKE_FAR = 280.0;
+        const GNC_ENERGY_EXCESS_MIN = 6.0;
+        const GNC_ENERGY_EXCESS_MAX = 28.0;
+        const GNC_LOFT_GAIN = 0.16;
+        const GNC_LOFT_DAMP = 0.28;
+        const GNC_TERRAIN_GAIN = 0.24;
+        const GNC_TERRAIN_DAMP = 0.82;
+        const GNC_TERMINAL_CLEARANCE_MIN = 8.0;
+        const GNC_TERMINAL_CLEARANCE_MAX = 20.0;
+        const GNC_TERRAIN_RELAX_TERM = 0.65;
+        const GNC_DESCENT_GAIN = 0.18;
+        const GNC_DESCENT_DAMP = 0.85;
+        const GNC_TERMINAL_DROP_GAIN = 0.30;
+        const GNC_TERMINAL_DROP_DAMP = 0.95;
+        const GNC_TERMINAL_DROP_CAP = 16.0;
+        const GNC_LATERAL_DAMP = 0.38;
+        const GNC_TURN_RATE_MIN = 0.90;
+        const GNC_TURN_RATE_MAX = 1.85;
+        const TERRAIN_FOLLOW_LOOKAHEAD_MIN = 120.0;
+        const TERRAIN_FOLLOW_LOOKAHEAD_MAX = 420.0;
+        const TERRAIN_FOLLOW_SAMPLES = 14;
+        const TERRAIN_CLEARANCE_MIN = 46.0;
+        const TERRAIN_CLEARANCE_MAX = 100.0;
+        const TERRAIN_GUIDANCE_CLIMB = 40.0;
+        const TERRAIN_RECOVER_ENTER = 18.0;
+        const TERRAIN_RECOVER_EXIT = 36.0;
+        const CANARD_LIMIT_DEG = 16.0;
+        const PREDICTION_FILTER_SHARPNESS = 12.0;
+        const TERMINAL_THROTTLE_MIN = 0.80;
+        const TERMINAL_THROTTLE_MAX = 1.00;
+        const MIDCOURSE_THROTTLE_MIN = 0.80;
+        const MIDCOURSE_THROTTLE_MAX = 1.0;
+        const FOLLOW_CAMERA_DEFAULT_OFFSET = new THREE.Vector3(10.0, 5.0, 15.0);
+        const NUM_PLANES = 14;
+        const PLANE_COLLISION_RADIUS = 6.0;
+        const PLANE_RESPAWN_TIME = 6.0;
+        const ROCKET_COLLISION_RADIUS = 2.4;
+        const PROX_FUZE_RADIUS = 24.0;
+        const ROCKET_CRASH_SPEED = 14.0;
+        const ROCKET_CRASH_TILT_COS = 0.72;
+
+        function clamp(x, a, b) { return x < a ? a : (x > b ? b : x); }
+        function lerp(a, b, t) { return a + (b - a) * t; }
+        function randRange(a, b) { return a + Math.random() * (b - a); }
+        function smoothExp(curr, target, sharpness, dt) {
+            let t = 1.0 - Math.exp(-sharpness * dt);
+            return curr + (target - curr) * t;
+        }
+        function smoothstep(a, b, x) {
+            if (Math.abs(b - a) < 1e-6) return x < a ? 0.0 : 1.0;
+            let t = clamp((x - a) / (b - a), 0.0, 1.0);
+            return t * t * (3.0 - 2.0 * t);
+        }
+        function quadraticBezierVec3(a, b, c, t) {
+            let u = 1.0 - t;
+            return new THREE.Vector3(
+                a.x * u * u + 2.0 * b.x * u * t + c.x * t * t,
+                a.y * u * u + 2.0 * b.y * u * t + c.y * t * t,
+                a.z * u * u + 2.0 * b.z * u * t + c.z * t * t
+            );
+        }
+        function rotateVectorToward(current, target, maxAngle) {
+            let a = current.clone().normalize();
+            let b = target.clone().normalize();
+            let dot = clamp(a.dot(b), -1.0, 1.0);
+            let angle = Math.acos(dot);
+            if (angle < 1e-5) return b;
+            let t = clamp(maxAngle / angle, 0.0, 1.0);
+            return a.lerp(b, t).normalize();
+        }
+        function normalizedOr(vec, fallback) {
+            if (vec.lengthSq() < 1e-8) return fallback.clone();
+            return vec.clone().normalize();
+        }
+        function makeGuidanceDebug() {
+            return {
+                label: 'IDLE',
+                airborne: 0.0,
+                padWeight: 1.0,
+                wTerminal: 0.0,
+                wLoft: 0.0,
+                wTerrain: 0.0,
+                wEnergy: 0.0,
+                wDirect: 0.0,
+                wDamping: 0.0,
+                range: 0.0,
+                timeToGo: 0.0,
+                closingSpeed: 0.0,
+                losRate: 0.0,
+                terrainMargin: 0.0,
+                safeClearanceError: 0.0,
+                abovePath: 0.0,
+                aboveReference: 0.0,
+                desiredSpeed: 0.0,
+                managedSpeed: 0.0,
+                throttleCmd: 0.0,
+                lateralLimit: 0.0,
+                lateralDemand: 0.0,
+                desiredLateralAccel: 0.0,
+                desiredAltitude: 0.0,
+                loftHeight: 0.0,
+                directAimBlend: 0.0,
+                terrainSafeY: 0.0,
+                guidanceClearance: 0.0,
+                terminalRelax: 0.0
+            };
+        }
+
+        function fract(x) {
+            return x - Math.floor(x);
+        }
+
+        function hash2(ix, iz) {
+            return fract(Math.sin(ix * 127.1 + iz * 311.7 + 91.7) * 43758.5453123);
+        }
+
+        function valueNoise2(x, z) {
+            let x0 = Math.floor(x);
+            let z0 = Math.floor(z);
+            let tx = x - x0;
+            let tz = z - z0;
+            let sx = tx * tx * (3.0 - 2.0 * tx);
+            let sz = tz * tz * (3.0 - 2.0 * tz);
+            let n00 = hash2(x0, z0);
+            let n10 = hash2(x0 + 1, z0);
+            let n01 = hash2(x0, z0 + 1);
+            let n11 = hash2(x0 + 1, z0 + 1);
+            let nx0 = lerp(n00, n10, sx);
+            let nx1 = lerp(n01, n11, sx);
+            return lerp(nx0, nx1, sz);
+        }
+
+        function fbm2(x, z) {
+            let sum = 0.0;
+            let amp = 0.5;
+            let freq = 1.0;
+            let norm = 0.0;
+
+            for (let i = 0; i < 5; i++) {
+                sum += amp * valueNoise2(x * freq, z * freq);
+                norm += amp;
+                amp *= 0.52;
+                freq *= 2.03;
+            }
+            return sum / norm;
+        }
+
+        function ridgedNoise2(x, z) {
+            let n = fbm2(x, z);
+            return 1.0 - Math.abs(2.0 * n - 1.0);
+        }
+
+        function getRawTerrainHeight(x, z) {
+            let warpX = Math.sin(z * 0.0013 + Math.cos(x * 0.0007) * 1.9) * 160.0;
+            let warpZ = Math.cos(x * 0.0011 - Math.sin(z * 0.0008) * 2.2) * 150.0;
+            warpX += (fbm2(x * 0.00075 + 7.0, z * 0.00075 - 4.0) - 0.5) * 110.0;
+            warpZ += (fbm2(x * 0.00075 - 9.0, z * 0.00075 + 5.0) - 0.5) * 110.0;
+            let wx = x + warpX;
+            let wz = z + warpZ;
+
+            let h1 = Math.sin(wx * 0.0048) * Math.cos(wz * 0.0057) * 150.0;
+            let h2 = Math.sin(wx * 0.017 + wz * 0.010) * Math.sin(wz * 0.013 - wx * 0.009) * 62.0;
+            let h3 = Math.cos(wx * 0.041) * Math.sin(wz * 0.033) * 16.0;
+            let h4 = Math.sin(wx * 0.0011 + 0.6) * 65.0 + Math.cos(wz * 0.00145 - 1.3) * 55.0;
+            let h5 = Math.sin((wx + wz) * 0.0090) * Math.cos((wz - wx) * 0.0065) * 34.0;
+            let ridgeMask = smoothstep(0.25, 0.78, fbm2(wx * 0.00055 - 3.0, wz * 0.00055 + 8.0));
+            let ridgeBands = Math.sin(wx * 0.011 - wz * 0.008) * Math.cos(wx * 0.006 + wz * 0.014) * 26.0 * ridgeMask;
+            let ridgePeaks = Math.pow(ridgedNoise2(wx * 0.0036 + 2.0, wz * 0.0036 - 5.0), 2.4) * 42.0 * ridgeMask;
+
+            let h = h1 + h2 + h3 + h4 + h5 + ridgeBands + ridgePeaks;
+            return Math.max(0.0, h + 82.0) - 82.0;
+        }
+
+        const LAUNCH_PAD_GROUND_Y = getRawTerrainHeight(LAUNCH_PAD_X, LAUNCH_PAD_Z);
+        const LAUNCH_PAD_TOP_Y = LAUNCH_PAD_GROUND_Y + LAUNCH_PAD_CLEARANCE + LAUNCH_PAD_HEIGHT;
+        const LAUNCH_PAD_BOTTOM_Y = LAUNCH_PAD_TOP_Y - LAUNCH_PAD_HEIGHT;
+
+        function getTerrainHeight(x, z) {
+            let dx = x - LAUNCH_PAD_X;
+            let dz = z - LAUNCH_PAD_Z;
+            let distToCenter = Math.sqrt(dx * dx + dz * dz);
+
+            let flattenFactor = clamp((distToCenter - FLAT_LAUNCH_RADIUS) / FLAT_TRANSITION_RADIUS, 0.0, 1.0);
+            let h = getRawTerrainHeight(x, z);
+            return lerp(LAUNCH_PAD_GROUND_Y, h, flattenFactor);
+        }
+
+        function getGroundHeight(x, z) {
+            const terrainY = getTerrainHeight(x, z);
+            const dx = x - LAUNCH_PAD_X;
+            const dz = z - LAUNCH_PAD_Z;
+            const distToCenter = Math.sqrt(dx * dx + dz * dz);
+            if (distToCenter <= LAUNCH_PAD_RADIUS) return Math.max(terrainY, LAUNCH_PAD_TOP_Y);
+            return terrainY;
+        }
+
+        // Physics State
+        class Rocket {
+            constructor() {
+                this.pos = new THREE.Vector3();
+                this.vel = new THREE.Vector3();
+                this.q = new THREE.Quaternion();
+                this.omega = new THREE.Vector3();
+                this.reset();
+            }
+
+            computeInertia() {
+                let m = this.mass;
+                let R = this.radius;
+                let H = this.bodyH;
+                this.Iyy = 0.5 * m * R * R;
+                this.Ixx = (1.0/12.0) * m * (3.0 * R * R + H * H) + 0.10 * m * this.noseH * this.noseH;
+                this.Izz = this.Ixx;
+            }
+
+            reset() {
+                this.radius = 0.42;
+                this.bodyH = 3.95;
+                this.noseH = 1.12;
+                this.height = this.bodyH + this.noseH;
+                this.mass = 90.0;
+
+                this.CdAxial = 0.28;
+                this.CdCross = 1.18;
+                this.angDamping = 0.34;
+                this.aeroCpOffset = 1.05;
+                this.finArea = 0.18;
+                this.finLiftSlope = 2.0;
+                this.finStabilityGain = 0.78;
+                this.finPosBody = new THREE.Vector3(0.0, -0.5 * this.height + 0.52, 0.0);
+                this.canardArea = 0.16;
+                this.canardLiftSlope = 2.4;
+                this.canardPosBody = new THREE.Vector3(0.0, 0.5 * this.height - 1.10, 0.0);
+
+                this.maxThrust = 3100.0;
+                this.throttleCmd = 0.0;
+                this.throttle = 0.0;
+                this.throttleResponse = 7.0;
+
+                this.gimbalXCmd = 0.0;
+                this.gimbalZCmd = 0.0;
+                this.gimbalX = 0.0;
+                this.gimbalZ = 0.0;
+                this.gimbalResponse = 18.0;
+                this.gimbalLimit = GIMBAL_LIMIT_DEG * DEG2RAD;
+                this.canardXCmd = 0.0;
+                this.canardZCmd = 0.0;
+                this.canardX = 0.0;
+                this.canardZ = 0.0;
+                this.canardResponse = 14.0;
+                this.canardLimit = CANARD_LIMIT_DEG * DEG2RAD;
+
+                this.enginePivotBody = new THREE.Vector3(0.0, -0.5 * this.height + 0.22, 0.0);
+                this.dryFriction = 0.82;
+                this.restitution = 0.12;
+                this.destroyed = false;
+                this.collisionRadius = ROCKET_COLLISION_RADIUS;
+
+                this.computeInertia();
+
+                this.pos.set(LAUNCH_PAD_X, getGroundHeight(LAUNCH_PAD_X, LAUNCH_PAD_Z) + this.height * 0.5, LAUNCH_PAD_Z);
+                this.vel.set(0.0, 0.0, 0.0);
+                this.q.identity();
+                this.omega.set(0.0, 0.0, 0.0);
+            }
+        }
+
+        const atm = {
+            density0: 1.225,
+            scaleHeight: 8500.0,
+            windBase: new THREE.Vector3(1.75, 0.0, -0.95),
+            gustAmp: 2.35,
+            gustFreq: 0.21,
+            swirl: 0.42
+        };
+
+        function airDensity(altitude) {
+            let h = Math.max(0.0, altitude);
+            return atm.density0 * Math.exp(-h / atm.scaleHeight);
+        }
+
+        function sampleWind(pos, t) {
+            let gust1 = Math.sin(t * atm.gustFreq + pos.x * 0.035 + pos.y * 0.009);
+            let gust2 = Math.cos(t * (atm.gustFreq * 1.7) + pos.z * 0.027 - pos.x * 0.018);
+            let swirl = Math.sin(pos.x * 0.04 + t * 0.12) * Math.cos(pos.z * 0.05 - t * 0.09);
+            let windRamp = smoothstep(8.0, 85.0, pos.y);
+            let baseScale = lerp(0.18, 1.0, windRamp);
+            let gustScale = lerp(0.08, 1.0, windRamp);
+            let swirlScale = lerp(0.05, 1.0, windRamp);
+
+            let wind = atm.windBase.clone().multiplyScalar(baseScale);
+            wind.x += atm.gustAmp * gustScale * gust1;
+            wind.z += atm.gustAmp * 0.8 * gustScale * gust2;
+            wind.y += 0.35 * gustScale * Math.sin(t * 0.43 + pos.y * 0.015);
+            wind.x += atm.swirl * swirlScale * swirl * (-pos.z * 0.03);
+            wind.z += atm.swirl * swirlScale * swirl * (pos.x * 0.03);
+            return wind;
+        }
+
+        function computeThrustDirBody(r) {
+            let euler = new THREE.Euler(r.gimbalX, 0, r.gimbalZ, 'ZYX');
+            let dir = new THREE.Vector3(0, 1, 0);
+            dir.applyEuler(euler).normalize();
+            return dir;
+        }
+
+        function makePidAxis(kp, ki, kd) {
+            return { kp, ki, kd, integral: 0.0 };
+        }
+
+        function resetPidAxis(axis) {
+            axis.integral = 0.0;
+        }
+
+        function stepPidAxis(axis, error, rate, dt) {
+            if (axis.ki > 0.0) {
+                axis.integral = clamp(axis.integral + error * dt, -TARGET_INTEGRAL_LIMIT, TARGET_INTEGRAL_LIMIT);
+            } else {
+                axis.integral = 0.0;
+            }
+            return axis.kp * error + axis.ki * axis.integral + axis.kd * rate;
+        }
+
+        function computeSurfaceForceBody(flowBody, deflectX, deflectZ, rho, area, liftSlope, alphaGain) {
+            let flowSpeedSq = flowBody.lengthSq();
+            if (flowSpeedSq < 4.0) return new THREE.Vector3();
+
+            let longitudinal = flowBody.y;
+            let alphaX = Math.atan2(flowBody.z, Math.abs(longitudinal) + 8.0);
+            let alphaZ = Math.atan2(-flowBody.x, Math.abs(longitudinal) + 8.0);
+            let effX = clamp(deflectX + alphaGain * alphaX, -0.45, 0.45);
+            let effZ = clamp(deflectZ + alphaGain * alphaZ, -0.45, 0.45);
+            let qLocal = 0.5 * rho * flowSpeedSq;
+            let coeff = qLocal * area * liftSlope;
+
+            return new THREE.Vector3(
+                coeff * effZ,
+                0.0,
+                -coeff * effX
+            );
+        }
+
+        let telem = { airspeed: 0, rho: 0 };
+
+        function stepPhysics(r, t, dt) {
+            if (r.destroyed) return;
+
+            const gravity = new THREE.Vector3(0, -9.81, 0);
+
+            r.throttle = smoothExp(r.throttle, r.throttleCmd, r.throttleResponse, dt);
+            r.gimbalX = smoothExp(r.gimbalX, r.gimbalXCmd, r.gimbalResponse, dt);
+            r.gimbalZ = smoothExp(r.gimbalZ, r.gimbalZCmd, r.gimbalResponse, dt);
+            r.canardX = smoothExp(r.canardX, r.canardXCmd, r.canardResponse, dt);
+            r.canardZ = smoothExp(r.canardZ, r.canardZCmd, r.canardResponse, dt);
+
+            let axisY = new THREE.Vector3(0, 1, 0).applyQuaternion(r.q).normalize();
+            
+            let rho = airDensity(r.pos.y);
+            let wind = sampleWind(r.pos, t);
+            let airVel = r.vel.clone().sub(wind);
+            let airspeed = airVel.length();
+            let invQ = r.q.clone().invert();
+            let airVelBody = airVel.clone().applyQuaternion(invQ);
+            telem.airspeed = airspeed;
+            telem.rho = rho;
+
+            let Fworld = gravity.clone().multiplyScalar(r.mass);
+            let Faero = new THREE.Vector3();
+            let TauW = new THREE.Vector3();
+
+            if (airspeed > 0.01) {
+                let vLong = airVel.dot(axisY);
+                let vParallel = axisY.clone().multiplyScalar(vLong);
+                let vCross = airVel.clone().sub(vParallel);
+                let vCrossMag = vCross.length();
+
+                let areaFrontal = Math.PI * r.radius * r.radius;
+                let areaSide = 2.0 * r.radius * r.height;
+
+                if (Math.abs(vLong) > 0.01) {
+                    let qAx = 0.5 * rho * r.CdAxial * areaFrontal * vLong * Math.abs(vLong);
+                    Faero.add(axisY.clone().multiplyScalar(-qAx));
+                }
+
+                if (vCrossMag > 0.01) {
+                    let vCrossDir = vCross.clone().multiplyScalar(1.0 / vCrossMag);
+                    let qCross = 0.5 * rho * r.CdCross * areaSide * vCrossMag * vCrossMag;
+                    let F_cross = vCrossDir.clone().multiplyScalar(-qCross);
+                    Faero.add(F_cross);
+
+                    let cpBody = new THREE.Vector3(0.0, -r.aeroCpOffset, 0.0);
+                    let cpWorld = cpBody.clone().applyQuaternion(r.q);
+                    TauW.add(cpWorld.clone().cross(F_cross));
+                }
+
+                let flowDir = airVel.clone().multiplyScalar(-1).normalize();
+                let alignAxis = axisY.clone().cross(flowDir);
+                let alignMag = alignAxis.length();
+                if (alignMag > 1e-4) {
+                    alignAxis.multiplyScalar(1.0 / alignMag);
+                    let alignStrength = 0.08 * rho * airspeed * airspeed * areaSide * r.radius;
+                    TauW.add(alignAxis.clone().multiplyScalar(alignStrength * alignMag));
+                }
+
+                let canardFlowBody = airVelBody.clone().add(r.omega.clone().cross(r.canardPosBody));
+                let finFlowBody = airVelBody.clone().add(r.omega.clone().cross(r.finPosBody));
+                let canardForceBody = computeSurfaceForceBody(
+                    canardFlowBody,
+                    r.canardX,
+                    r.canardZ,
+                    rho,
+                    r.canardArea,
+                    r.canardLiftSlope,
+                    0.0
+                );
+                let finForceBody = computeSurfaceForceBody(
+                    finFlowBody,
+                    0.0,
+                    0.0,
+                    rho,
+                    r.finArea,
+                    r.finLiftSlope,
+                    r.finStabilityGain
+                );
+
+                if (canardForceBody.lengthSq() > 0.0) {
+                    let canardForceWorld = canardForceBody.clone().applyQuaternion(r.q);
+                    let canardPosWorld = r.canardPosBody.clone().applyQuaternion(r.q);
+                    Faero.add(canardForceWorld);
+                    TauW.add(canardPosWorld.clone().cross(canardForceWorld));
+                }
+
+                if (finForceBody.lengthSq() > 0.0) {
+                    let finForceWorld = finForceBody.clone().applyQuaternion(r.q);
+                    let finPosWorld = r.finPosBody.clone().applyQuaternion(r.q);
+                    Faero.add(finForceWorld);
+                    TauW.add(finPosWorld.clone().cross(finForceWorld));
+                }
+            }
+            Fworld.add(Faero);
+
+            let thrustDirBody = computeThrustDirBody(r);
+            let thrustMag = r.throttle * r.maxThrust;
+            let thrustWorld = thrustDirBody.clone().applyQuaternion(r.q).multiplyScalar(thrustMag);
+            let engineOffsetWorld = r.enginePivotBody.clone().applyQuaternion(r.q);
+
+            Fworld.add(thrustWorld);
+            TauW.add(engineOffsetWorld.clone().cross(thrustWorld));
+
+            let aeroDampBody = new THREE.Vector3(
+                -r.omega.x * Math.abs(r.omega.x) * r.angDamping * r.Ixx,
+                -r.omega.y * Math.abs(r.omega.y) * r.angDamping * 0.35 * r.Iyy,
+                -r.omega.z * Math.abs(r.omega.z) * r.angDamping * r.Izz
+            );
+            TauW.add(aeroDampBody.applyQuaternion(r.q));
+
+            let groundY = getGroundHeight(r.pos.x, r.pos.z);
+
+            if (r.pos.y - groundY < 2.0) {
+                Fworld.x += -0.18 * r.vel.x * Math.abs(r.vel.x);
+                Fworld.z += -0.18 * r.vel.z * Math.abs(r.vel.z);
+            }
+
+            let accel = Fworld.clone().multiplyScalar(1.0 / r.mass);
+            r.vel.add(accel.clone().multiplyScalar(dt));
+            r.pos.add(r.vel.clone().multiplyScalar(dt));
+
+            let TauB = TauW.clone().applyQuaternion(r.q.clone().invert());
+            let Iw = new THREE.Vector3(r.Ixx * r.omega.x, r.Iyy * r.omega.y, r.Izz * r.omega.z);
+            let gyro = r.omega.clone().cross(Iw);
+            let domega = new THREE.Vector3(
+                (TauB.x - gyro.x) / r.Ixx,
+                (TauB.y - gyro.y) / r.Iyy,
+                (TauB.z - gyro.z) / r.Izz
+            );
+
+            r.omega.add(domega.clone().multiplyScalar(dt));
+            
+            let wq = new THREE.Quaternion(r.omega.x, r.omega.y, r.omega.z, 0);
+            let dq = r.q.clone().multiply(wq);
+            r.q.x += 0.5 * dt * dq.x;
+            r.q.y += 0.5 * dt * dq.y;
+            r.q.z += 0.5 * dt * dq.z;
+            r.q.w += 0.5 * dt * dq.w;
+            r.q.normalize();
+
+            let upWorld = new THREE.Vector3(0, 1, 0).applyQuaternion(r.q).normalize();
+            let bottomTip = r.pos.clone().add(upWorld.clone().multiplyScalar(-0.5 * r.height));
+            
+            if (bottomTip.y < groundY) {
+                let impactSpeed = Math.max(0.0, -r.vel.dot(upWorld));
+                let uprightCos = upWorld.dot(new THREE.Vector3(0, 1, 0));
+                if (impactSpeed > ROCKET_CRASH_SPEED || airspeed > 35.0 || uprightCos < ROCKET_CRASH_TILT_COS) {
+                    explodeRocket(bottomTip.clone(), 0xff8844);
+                    return;
+                }
+
+                let penetration = groundY - bottomTip.y;
+                r.pos.y += penetration;
+
+                if (r.vel.y < 0) r.vel.y *= -r.restitution;
+                r.vel.x *= r.dryFriction;
+                r.vel.z *= r.dryFriction;
+
+                r.omega.x *= 0.75;
+                r.omega.y *= 0.90;
+                r.omega.z *= 0.75;
+            }
+        }
+
+        // --- Three.js Setup ---
+        let scene, camera, renderer, controls;
+        let rocketMesh, engineGroup, thrustMesh, gimbalArrow, targetLine, targetMarker;
+        let followCameraTarget = new THREE.Vector3();
+        let planes = [];
+        let explosions = [];
+
+        const targeting = {
+            enabled: false,
+            targetIndex: -1,
+            hasPrediction: false,
+            targetDistance: 0.0,
+            interceptTime: 0.0,
+            terrainFloorY: 0.0,
+            terrainSafeY: 0.0,
+            desiredAltitude: 0.0,
+            clearanceTarget: TERRAIN_CLEARANCE_MIN,
+            predictedPoint: new THREE.Vector3(),
+            trajectoryPoint: new THREE.Vector3(),
+            trajectoryControlPoint: new THREE.Vector3(),
+            desiredAccel: new THREE.Vector3(),
+            desiredThrustDir: new THREE.Vector3(0.0, 1.0, 0.0),
+            guidanceMode: 'IDLE',
+            loftHeight: 0.0,
+            terminalBlend: 0.0,
+            guidanceDebug: makeGuidanceDebug(),
+            nextPredictionTime: 0.0,
+        };
+
+        const rocket = new Rocket();
+
+        function getRocketAimOrigin() {
+            let noseOffset = new THREE.Vector3(0.0, 0.5 * rocket.height, 0.0);
+            noseOffset.applyQuaternion(rocket.q);
+            return rocket.pos.clone().add(noseOffset);
+        }
+
+        function resetTargetingController() {
+            targeting.hasPrediction = false;
+            targeting.targetDistance = 0.0;
+            targeting.interceptTime = 0.0;
+            targeting.terrainFloorY = 0.0;
+            targeting.terrainSafeY = 0.0;
+            targeting.desiredAltitude = 0.0;
+            targeting.clearanceTarget = TERRAIN_CLEARANCE_MIN;
+            targeting.predictedPoint.set(0.0, 0.0, 0.0);
+            targeting.trajectoryPoint.set(0.0, 0.0, 0.0);
+            targeting.trajectoryControlPoint.set(0.0, 0.0, 0.0);
+            targeting.desiredAccel.set(0.0, 0.0, 0.0);
+            targeting.desiredThrustDir.set(0.0, 1.0, 0.0);
+            targeting.guidanceMode = 'IDLE';
+            targeting.loftHeight = 0.0;
+            targeting.terminalBlend = 0.0;
+            targeting.guidanceDebug = makeGuidanceDebug();
+            targeting.nextPredictionTime = 0.0;
+        }
+
+        function getNearestPlaneIndex() {
+            let aimOrigin = getRocketAimOrigin();
+            let bestIndex = -1;
+            let bestDistSq = Infinity;
+
+            for (let i = 0; i < planes.length; i++) {
+                if (!planes[i].alive) continue;
+                let distSq = aimOrigin.distanceToSquared(planes[i].mesh.position);
+                if (distSq < bestDistSq) {
+                    bestDistSq = distSq;
+                    bestIndex = i;
+                }
+            }
+            return bestIndex;
+        }
+
+        function ensureTargetIndex() {
+            if (!planes.length) return -1;
+            if (
+                targeting.targetIndex < 0 ||
+                targeting.targetIndex >= planes.length ||
+                !planes[targeting.targetIndex].alive
+            ) {
+                targeting.targetIndex = getNearestPlaneIndex();
+            }
+            return targeting.targetIndex;
+        }
+
+        function getTargetPlane() {
+            let idx = ensureTargetIndex();
+            return idx >= 0 ? planes[idx] : null;
+        }
+
+        function cycleTarget() {
+            if (!planes.length) return;
+            let start = targeting.targetIndex < 0 ? 0 : targeting.targetIndex + 1;
+            targeting.targetIndex = -1;
+            for (let i = 0; i < planes.length; i++) {
+                let idx = (start + i) % planes.length;
+                if (planes[idx].alive) {
+                    targeting.targetIndex = idx;
+                    break;
+                }
+            }
+            resetTargetingController();
+        }
+
+        function setTargetingEnabled(enabled) {
+            targeting.enabled = enabled;
+            if (enabled && targeting.targetIndex < 0) targeting.targetIndex = getNearestPlaneIndex();
+            if (!enabled) {
+                rocket.gimbalXCmd = 0.0;
+                rocket.gimbalZCmd = 0.0;
+                rocket.canardXCmd = 0.0;
+                rocket.canardZCmd = 0.0;
+                rocket.throttleCmd = 0.0;
+            }
+            resetTargetingController();
+        }
+
+        function sampleTerrainFloor(origin, destination) {
+            let deltaXZ = new THREE.Vector3(destination.x - origin.x, 0.0, destination.z - origin.z);
+            let horizontalDistance = deltaXZ.length();
+            let travelDistance = Math.max(horizontalDistance, TERRAIN_FOLLOW_LOOKAHEAD_MIN);
+            let sampleCount = Math.min(36, Math.max(TERRAIN_FOLLOW_SAMPLES, Math.ceil(travelDistance / 60.0)));
+            let maxGround = getGroundHeight(origin.x, origin.z);
+
+            if (horizontalDistance < 1e-3) return maxGround;
+
+            deltaXZ.multiplyScalar(1.0 / horizontalDistance);
+
+            for (let i = 1; i <= sampleCount; i++) {
+                let d = travelDistance * (i / sampleCount);
+                let sx = origin.x + deltaXZ.x * d;
+                let sz = origin.z + deltaXZ.z * d;
+                maxGround = Math.max(maxGround, getGroundHeight(sx, sz));
+            }
+
+            return maxGround;
+        }
+
+        function estimateInterceptTime(origin, targetPos, targetVel) {
+            let relPos = targetPos.clone().sub(origin);
+            let range = relPos.length();
+            if (range < 1e-3) return 0.0;
+
+            let netAccel = Math.max(0.0, rocket.maxThrust / rocket.mass - 9.81);
+            let speed = rocket.vel.length();
+            let leadTime = clamp(
+                range / Math.max(TARGET_INTERCEPT_SPEED_MIN, speed + 0.55 * netAccel),
+                0.0,
+                TARGET_INTERCEPT_TIME_MAX
+            );
+
+            for (let i = 0; i < 2; i++) {
+                let futureOffset = targetPos.clone().addScaledVector(targetVel, leadTime).sub(origin);
+                let futureRange = futureOffset.length();
+                if (futureRange < 1e-3) return 0.0;
+
+                let losDir = futureOffset.clone().multiplyScalar(1.0 / futureRange);
+                let alongSpeed = Math.max(18.0, rocket.vel.dot(losDir));
+                let achievableSpeed = clamp(
+                    0.65 * alongSpeed + 0.35 * (speed + netAccel * Math.min(leadTime, 2.0)),
+                    TARGET_INTERCEPT_SPEED_MIN,
+                    TARGET_INTERCEPT_SPEED_MAX
+                );
+                let leadCap = lerp(1.2, TARGET_INTERCEPT_TIME_MAX, smoothstep(180.0, 1500.0, futureRange));
+                leadTime = clamp(futureRange / achievableSpeed, 0.0, leadCap);
+            }
+            return leadTime;
+        }
+
+        // ===== SIMPLIFIED GUIDANCE SYSTEM =====
+        // Pure Proportional Navigation with terrain avoidance and launch blend
+
+        function updateTargetPrediction(now) {
+            if (now < targeting.nextPredictionTime) return;
+            targeting.nextPredictionTime = now + 1.0 / 240.0;
+
+            let target = getTargetPlane();
+            if (!target) {
+                targeting.hasPrediction = false;
+                return;
+            }
+
+            let aimOrigin = getRocketAimOrigin();
+            let targetPos = target.mesh.position;
+            let targetVel = target.vel;
+
+            let toTarget = targetPos.clone().sub(aimOrigin);
+            let range = toTarget.length();
+            let speed = Math.max(50.0, rocket.vel.length());
+
+            // Simple iterative lead time
+            let leadTime = clamp(range / speed, 0.0, 6.0);
+            let rawIntercept = targetPos.clone().addScaledVector(targetVel, leadTime);
+            leadTime = clamp(rawIntercept.distanceTo(aimOrigin) / speed, 0.0, 6.0);
+            rawIntercept = targetPos.clone().addScaledVector(targetVel, leadTime);
+
+            // Exponential filter for smoothness
+            let alpha = 1.0 - Math.exp(-14.0 / 240.0);
+            if (!targeting.hasPrediction) {
+                targeting.predictedPoint.copy(rawIntercept);
+                targeting.interceptTime = leadTime;
+            } else {
+                targeting.predictedPoint.lerp(rawIntercept, alpha);
+                targeting.interceptTime = lerp(targeting.interceptTime, leadTime, alpha);
+            }
+
+            targeting.targetDistance = range;
+            targeting.hasPrediction = true;
+        }
+
+        function computeActuatorCommandsForDesiredAxis(desiredAxisWorld, dt) {
+            let bodyAxisWorld = new THREE.Vector3(0, 1, 0).applyQuaternion(rocket.q).normalize();
+            let errWorld = bodyAxisWorld.clone().cross(desiredAxisWorld);
+            let errBody = errWorld.applyQuaternion(rocket.q.clone().invert());
+
+            // Attitude -> desired rate
+            let attKp = 1.25;
+            let rateLimit = 1.0;
+            let desiredRateX = clamp(attKp * errBody.x, -rateLimit, rateLimit);
+            let desiredRateZ = clamp(attKp * errBody.z, -rateLimit, rateLimit);
+
+            // Rate -> gimbal command
+            let rateKp = 0.26;
+            let rateErrX = desiredRateX - rocket.omega.x;
+            let rateErrZ = desiredRateZ - rocket.omega.z;
+
+            let gimbalX = clamp(-rateKp * rateErrX, -rocket.gimbalLimit, rocket.gimbalLimit);
+            let gimbalZ = clamp(-rateKp * rateErrZ, -rocket.gimbalLimit, rocket.gimbalLimit);
+
+            // Canards help at higher airspeed
+            let surfaceBlend = smoothstep(55.0, 120.0, telem.airspeed);
+            let canardKp = 0.18;
+            let canardX = clamp(-canardKp * rateErrX * surfaceBlend, -rocket.canardLimit, rocket.canardLimit);
+            let canardZ = clamp(-canardKp * rateErrZ * surfaceBlend, -rocket.canardLimit, rocket.canardLimit);
+
+            return { gimbalX, gimbalZ, canardX, canardZ };
+        }
+
+        function updateTargetingController(dt) {
+            if (!targeting.enabled || rocket.destroyed) return;
+
+            let target = getTargetPlane();
+            if (!target || !targeting.hasPrediction) {
+                rocket.gimbalXCmd = 0.0;
+                rocket.gimbalZCmd = 0.0;
+                rocket.canardXCmd = 0.0;
+                rocket.canardZCmd = 0.0;
+                rocket.throttleCmd = 0.0;
+                targeting.guidanceMode = 'IDLE';
+                return;
+            }
+
+            let aimOrigin = getRocketAimOrigin();
+            let interceptPt = targeting.predictedPoint.clone();
+            let targetPos = target.mesh.position.clone();
+            let targetVel = target.vel.clone();
+            let range = targeting.targetDistance;
+            let speed = rocket.vel.length();
+
+            // ===== PROPORTIONAL NAVIGATION =====
+            let los = interceptPt.clone().sub(aimOrigin);
+            let losRange = Math.max(los.length(), 1.0);
+            let losDir = los.clone().multiplyScalar(1.0 / losRange);
+
+            let relVel = targetVel.clone().sub(rocket.vel);
+            let vc = Math.max(10.0, -relVel.dot(losDir)); // closing speed
+
+            // LOS angular rate
+            let losOmega = los.clone().cross(relVel).multiplyScalar(1.0 / (losRange * losRange));
+
+            // PN acceleration: a = N * Vc * (omega x losDir)
+            let N = lerp(3.2, 4.1, smoothstep(120.0, 900.0, range));
+            let accelCmd = losOmega.clone().cross(losDir).multiplyScalar(N * vc);
+
+            // Gravity compensation
+            accelCmd.y += 9.81;
+
+            // Forward drive: PN only gives lateral correction, we also need
+            // to actually FLY TOWARD the target
+            let velToward = rocket.vel.dot(losDir);
+            let desiredSpeed = clamp(120.0 + losRange * 0.02, 80.0, 160.0);
+            let fwdAccel = clamp((desiredSpeed - velToward) / 1.5, -3.0, 28.0);
+            accelCmd.addScaledVector(losDir, fwdAccel);
+
+            // When close, aim more at actual target position instead of predicted
+            let directBlend = 1.0 - smoothstep(40.0, 140.0, range);
+            if (directBlend > 0.01) {
+                let directLos = targetPos.clone().sub(aimOrigin);
+                let directRange = Math.max(directLos.length(), 1.0);
+                let directDir = directLos.clone().multiplyScalar(1.0 / directRange);
+                let directRelVel = targetVel.clone().sub(rocket.vel);
+                let directVc = Math.max(10.0, -directRelVel.dot(directDir));
+                let directOmega = directLos.clone().cross(directRelVel).multiplyScalar(1.0 / (directRange * directRange));
+                let directAccel = directOmega.clone().cross(directDir).multiplyScalar(N * directVc);
+                directAccel.y += 9.81;
+                // Forward drive toward actual target when close
+                let directVelToward = rocket.vel.dot(directDir);
+                let directFwd = clamp((80.0 - directVelToward) / 1.5, -3.0, 20.0);
+                directAccel.addScaledVector(directDir, directFwd);
+                accelCmd.lerp(directAccel, directBlend);
+            }
+
+            // ===== TERRAIN AVOIDANCE =====
+            let groundY = getGroundHeight(rocket.pos.x, rocket.pos.z);
+            let lookSec = clamp(speed * 0.025, 0.5, 3.0);
+            let aheadGround = getGroundHeight(
+                rocket.pos.x + rocket.vel.x * lookSec,
+                rocket.pos.z + rocket.vel.z * lookSec
+            );
+            let aheadGround2 = getGroundHeight(
+                rocket.pos.x + rocket.vel.x * lookSec * 2.0,
+                rocket.pos.z + rocket.vel.z * lookSec * 2.0
+            );
+            let worstGround = Math.max(groundY, aheadGround, aheadGround2);
+            let minClearance = clamp(35.0 + speed * 0.15, 35.0, 90.0);
+            let margin = rocket.pos.y - worstGround;
+
+            if (margin < minClearance) {
+                let urgency = clamp((minClearance - margin) / (minClearance * 0.5), 0.0, 1.0);
+                accelCmd.y += urgency * 30.0;
+                if (rocket.vel.y < 0.0) accelCmd.y += -rocket.vel.y * urgency * 4.0;
+            }
+
+            // ===== LAUNCH BLEND =====
+            let padGroundY = getGroundHeight(LAUNCH_PAD_X, LAUNCH_PAD_Z);
+            let launchAlt = rocket.pos.y - padGroundY;
+            let launchBlend = clamp(
+                Math.max(smoothstep(5.0, 45.0, launchAlt), smoothstep(5.0, 35.0, speed)),
+                0.0, 1.0
+            );
+
+            if (launchBlend < 1.0) {
+                let upCmd = new THREE.Vector3(0.0, 28.0, 0.0);
+                let hDir = new THREE.Vector3(losDir.x, 0.0, losDir.z);
+                if (hDir.lengthSq() > 0.01) {
+                    hDir.normalize();
+                    upCmd.addScaledVector(hDir, 16.0 * launchBlend);
+                }
+                accelCmd.lerp(upCmd, 1.0 - launchBlend);
+            }
+
+            // ===== DESIRED THRUST DIRECTION =====
+            let desiredDir = accelCmd.lengthSq() > 0.01
+                ? accelCmd.clone().normalize()
+                : new THREE.Vector3(0, 1, 0).applyQuaternion(rocket.q);
+
+            // Rate-limit direction changes for stability
+            if (targeting.desiredThrustDir.lengthSq() > 0.1) {
+                desiredDir = rotateVectorToward(targeting.desiredThrustDir, desiredDir, 3.5 * dt);
+            }
+            targeting.desiredThrustDir.copy(desiredDir);
+
+            // ===== THROTTLE =====
+            rocket.throttleCmd = 1.0;
+
+            // ===== STORE FOR VIZ =====
+            targeting.trajectoryPoint.copy(interceptPt);
+            targeting.desiredAltitude = interceptPt.y;
+            targeting.guidanceMode = launchBlend < 0.5 ? 'BOOST' : (range < 150.0 ? 'CLOSE' : 'PN');
+
+            // ===== ACTUATOR COMMANDS =====
+            let cmd = computeActuatorCommandsForDesiredAxis(desiredDir, dt);
+            let cmdAlpha = 1.0 - Math.exp(-10.0 * dt);
+            rocket.gimbalXCmd = lerp(rocket.gimbalXCmd, cmd.gimbalX, cmdAlpha);
+            rocket.gimbalZCmd = lerp(rocket.gimbalZCmd, cmd.gimbalZ, cmdAlpha);
+            rocket.canardXCmd = lerp(rocket.canardXCmd, cmd.canardX, cmdAlpha);
+            rocket.canardZCmd = lerp(rocket.canardZCmd, cmd.canardZ, cmdAlpha);
+
+            let cone = Math.hypot(rocket.gimbalXCmd, rocket.gimbalZCmd);
+            if (cone > rocket.gimbalLimit && cone > 1e-6) {
+                let s = rocket.gimbalLimit / cone;
+                rocket.gimbalXCmd *= s;
+                rocket.gimbalZCmd *= s;
+            }
+            let cc = Math.hypot(rocket.canardXCmd, rocket.canardZCmd);
+            if (cc > rocket.canardLimit && cc > 1e-6) {
+                let s = rocket.canardLimit / cc;
+                rocket.canardXCmd *= s;
+                rocket.canardZCmd *= s;
+            }
+        }
+
+        function spawnExplosion(position, color, size) {
+            if (!scene) return;
+
+            let group = new THREE.Group();
+
+            let coreMat = new THREE.MeshBasicMaterial({
+                color,
+                transparent: true,
+                opacity: 0.95,
+                depthWrite: false
+            });
+            let core = new THREE.Mesh(new THREE.SphereGeometry(1.0, 18, 18), coreMat);
+            group.add(core);
+
+            let shellMat = new THREE.MeshBasicMaterial({
+                color: 0xffdd99,
+                transparent: true,
+                opacity: 0.60,
+                wireframe: true,
+                depthWrite: false
+            });
+            let shell = new THREE.Mesh(new THREE.SphereGeometry(1.25, 16, 16), shellMat);
+            group.add(shell);
+
+            group.position.copy(position);
+            scene.add(group);
+            explosions.push({ group, core, shell, age: 0.0, duration: 0.9, size });
+        }
+
+        function clearExplosions() {
+            for (let i = 0; i < explosions.length; i++) {
+                scene.remove(explosions[i].group);
+            }
+            explosions = [];
+        }
+
+        function updateExplosions(dt) {
+            for (let i = explosions.length - 1; i >= 0; i--) {
+                let e = explosions[i];
+                e.age += dt;
+                let t = clamp(e.age / e.duration, 0.0, 1.0);
+                let scale = lerp(1.0, e.size, t);
+                let shellScale = lerp(1.2, e.size * 1.6, t);
+
+                e.group.scale.setScalar(scale);
+                e.shell.scale.setScalar(shellScale / Math.max(scale, 1e-6));
+                e.core.material.opacity = 0.95 * (1.0 - t);
+                e.shell.material.opacity = 0.65 * (1.0 - t);
+
+                if (t >= 1.0) {
+                    scene.remove(e.group);
+                    explosions.splice(i, 1);
+                }
+            }
+        }
+
+        function explodeRocket(position, color = 0xff8844) {
+            if (rocket.destroyed) return;
+
+            rocket.destroyed = true;
+            rocket.throttleCmd = 0.0;
+            rocket.throttle = 0.0;
+            rocket.gimbalXCmd = 0.0;
+            rocket.gimbalZCmd = 0.0;
+            rocket.vel.set(0.0, 0.0, 0.0);
+            rocket.omega.set(0.0, 0.0, 0.0);
+            rocketMesh.visible = false;
+            setTargetingEnabled(false);
+            spawnExplosion(position, color, 18.0);
+        }
+
+        function explodePlane(plane, color = 0xffdd66) {
+            if (!plane.alive) return;
+
+            plane.alive = false;
+            plane.respawnTimer = PLANE_RESPAWN_TIME;
+            plane.vel.set(0.0, 0.0, 0.0);
+            plane.mesh.visible = false;
+            spawnExplosion(plane.mesh.position.clone(), color, 12.0);
+
+            if (targeting.targetIndex >= 0 && planes[targeting.targetIndex] === plane) {
+                targeting.targetIndex = getNearestPlaneIndex();
+                resetTargetingController();
+            }
+        }
+
+        function checkRocketPlaneCollisions() {
+            if (rocket.destroyed) return;
+
+            for (let i = 0; i < planes.length; i++) {
+                let plane = planes[i];
+                if (!plane.alive) continue;
+                let hitDistance = rocket.collisionRadius + plane.radius;
+                let distSq = rocket.pos.distanceToSquared(plane.mesh.position);
+                if (distSq <= hitDistance * hitDistance) {
+                    explodePlane(plane, 0xffdd66);
+                    explodeRocket(rocket.pos.clone(), 0xff6633);
+                    return;
+                }
+                if (distSq <= PROX_FUZE_RADIUS * PROX_FUZE_RADIUS) {
+                    let relPos = plane.mesh.position.clone().sub(rocket.pos);
+                    let relVel = plane.vel.clone().sub(rocket.vel);
+                    if (relPos.dot(relVel) < 0.0) {
+                        explodePlane(plane, 0xfff07a);
+                        explodeRocket(rocket.pos.clone(), 0xffaa44);
+                        return;
+                    }
+                }
+            }
+        }
+
+        function init3D() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x5ca0db);
+            scene.fog = new THREE.FogExp2(0x5ca0db, 0.00045);
+
+            camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 8000);
+            camera.position.set(10, 5, 15);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            document.body.appendChild(renderer.domElement);
+
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+            controls.maxDistance = 900;
+            controls.minDistance = 2;
+            controls.target.copy(rocket.pos);
+            followCameraTarget.copy(rocket.pos);
+            camera.position.copy(followCameraTarget).add(FOLLOW_CAMERA_DEFAULT_OFFSET);
+
+            let ambient = new THREE.HemisphereLight(0xffffff, 0x444444, 0.6);
+            scene.add(ambient);
+            
+            let dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            dirLight.position.set(100, 200, 50);
+            dirLight.castShadow = true;
+            dirLight.shadow.camera.top = 100;
+            dirLight.shadow.camera.bottom = -100;
+            dirLight.shadow.camera.left = -100;
+            dirLight.shadow.camera.right = 100;
+            dirLight.shadow.camera.near = 0.1;
+            dirLight.shadow.camera.far = 500;
+            scene.add(dirLight);
+
+            buildTerrain();
+            buildRocketMesh();
+            buildAirplanes();
+            buildTargetingViz();
+
+            window.addEventListener('resize', onWindowResize, false);
+        }
+
+        function buildTerrain() {
+            const geo = new THREE.PlaneGeometry(TERRAIN_SIZE, TERRAIN_SIZE, TERRAIN_SEGMENTS, TERRAIN_SEGMENTS);
+            geo.rotateX(-Math.PI / 2);
+
+            const pos = geo.attributes.position;
+            const colors = [];
+
+            for (let i = 0; i < pos.count; i++) {
+                let x = pos.getX(i);
+                let z = pos.getZ(i);
+                let y = getTerrainHeight(x, z);
+                pos.setY(i, y);
+
+                let color = new THREE.Color();
+                let padDist = Math.hypot(x - LAUNCH_PAD_X, z - LAUNCH_PAD_Z);
+                if (padDist < FLAT_LAUNCH_RADIUS + 10.0) color.setHex(0x4d4a43);
+                else if (y > 92.0) color.setHex(0xf0f2f4);
+                else if (y > 48.0) color.setHex(0x7c807b);
+                else if (y > 10.0) color.setHex(0x566b3d);
+                else if (y > -28.0) color.setHex(0x5f6f46);
+                else color.setHex(0x667252);
+                color.offsetHSL(0.0, 0.0, (valueNoise2(x * 0.018 + 9.0, z * 0.018 - 11.0) - 0.5) * 0.08);
+                colors.push(color.r, color.g, color.b);
+            }
+            geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+            geo.computeVertexNormals();
+
+            const mat = new THREE.MeshStandardMaterial({ 
+                vertexColors: true, 
+                roughness: 0.9, 
+                metalness: 0.0,
+                flatShading: true
+            });
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.receiveShadow = true;
+            scene.add(mesh);
+
+            const padGroup = new THREE.Group();
+            const padGeo = new THREE.CylinderGeometry(LAUNCH_PAD_RADIUS, LAUNCH_PAD_RADIUS, LAUNCH_PAD_HEIGHT, 32);
+            const padMat = new THREE.MeshStandardMaterial({ color: 0x555555, roughness: 0.9 });
+            const pad = new THREE.Mesh(padGeo, padMat);
+            pad.position.set(LAUNCH_PAD_X, LAUNCH_PAD_TOP_Y - 0.5 * LAUNCH_PAD_HEIGHT, LAUNCH_PAD_Z);
+            pad.castShadow = true;
+            pad.receiveShadow = true;
+            padGroup.add(pad);
+
+            const padRimGeo = new THREE.TorusGeometry(LAUNCH_PAD_RADIUS - 0.55, 0.32, 10, 36);
+            const padRim = new THREE.Mesh(
+                padRimGeo,
+                new THREE.MeshStandardMaterial({ color: 0x78746d, roughness: 0.72, metalness: 0.15 })
+            );
+            padRim.rotation.x = Math.PI * 0.5;
+            padRim.position.set(LAUNCH_PAD_X, LAUNCH_PAD_TOP_Y + 0.05, LAUNCH_PAD_Z);
+            padRim.castShadow = true;
+            padGroup.add(padRim);
+
+            const legMat = new THREE.MeshStandardMaterial({ color: 0x64686f, roughness: 0.68, metalness: 0.22 });
+            const footMat = new THREE.MeshStandardMaterial({ color: 0x4d5158, roughness: 0.8 });
+            const legOffsets = [
+                new THREE.Vector2(1.0, 1.0),
+                new THREE.Vector2(-1.0, 1.0),
+                new THREE.Vector2(-1.0, -1.0),
+                new THREE.Vector2(1.0, -1.0)
+            ];
+
+            for (const offset of legOffsets) {
+                const legX = LAUNCH_PAD_X + offset.x * LAUNCH_PAD_RADIUS * 0.62;
+                const legZ = LAUNCH_PAD_Z + offset.y * LAUNCH_PAD_RADIUS * 0.62;
+                const legGroundY = getTerrainHeight(legX, legZ);
+                const legHeight = Math.max(2.5, LAUNCH_PAD_BOTTOM_Y - legGroundY);
+                const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.58, legHeight, 10), legMat);
+                leg.position.set(legX, legGroundY + 0.5 * legHeight, legZ);
+                leg.castShadow = true;
+                leg.receiveShadow = true;
+                padGroup.add(leg);
+
+                const foot = new THREE.Mesh(new THREE.CylinderGeometry(0.95, 1.15, 0.35, 12), footMat);
+                foot.position.set(legX, legGroundY + 0.175, legZ);
+                foot.castShadow = true;
+                foot.receiveShadow = true;
+                padGroup.add(foot);
+            }
+
+            scene.add(padGroup);
+        }
+
+        function buildRocketMesh() {
+            rocketMesh = new THREE.Group();
+
+            const bodyGeo = new THREE.CylinderGeometry(rocket.radius, rocket.radius, rocket.bodyH, 24);
+            bodyGeo.translate(0, -0.5 * rocket.height + rocket.bodyH / 2, 0);
+            const bodyMat = new THREE.MeshStandardMaterial({ color: 0xd2d4dc, roughness: 0.4 });
+            const body = new THREE.Mesh(bodyGeo, bodyMat);
+            body.castShadow = true;
+            rocketMesh.add(body);
+
+            const noseGeo = new THREE.ConeGeometry(rocket.radius, rocket.noseH, 24);
+            noseGeo.translate(0, -0.5 * rocket.height + rocket.bodyH + rocket.noseH / 2, 0);
+            const noseMat = new THREE.MeshStandardMaterial({ color: 0xe85e42, roughness: 0.5 });
+            const nose = new THREE.Mesh(noseGeo, noseMat);
+            nose.castShadow = true;
+            rocketMesh.add(nose);
+
+            const finMat = new THREE.MeshStandardMaterial({ color: 0x56606c, roughness: 0.56 });
+            const finBandGeo = new THREE.CylinderGeometry(rocket.radius * 1.015, rocket.radius * 1.015, 0.34, 24);
+            finBandGeo.translate(0, -0.5 * rocket.height + 0.28, 0);
+            const finBand = new THREE.Mesh(finBandGeo, new THREE.MeshStandardMaterial({ color: 0x4d5662, roughness: 0.62 }));
+            finBand.castShadow = true;
+            rocketMesh.add(finBand);
+
+            const finShape = new THREE.Shape();
+            finShape.moveTo(0.0, 0.0);
+            finShape.lineTo(0.82, 0.10);
+            finShape.lineTo(0.16, 0.78);
+            finShape.lineTo(0.0, 0.60);
+            finShape.closePath();
+
+            const finGeo = new THREE.ExtrudeGeometry(finShape, { depth: 0.05, bevelEnabled: false });
+            finGeo.translate(rocket.radius - 0.02, -0.5 * rocket.height + 0.06, -0.025);
+
+            for (let i = 0; i < 3; i++) {
+                const fin = new THREE.Mesh(finGeo, finMat);
+                fin.rotation.y = i * (Math.PI * 2.0 / 3.0);
+                fin.castShadow = true;
+                rocketMesh.add(fin);
+            }
+
+            const canardMat = new THREE.MeshStandardMaterial({ color: 0xaab6c2, roughness: 0.48 });
+            const canardBandGeo = new THREE.CylinderGeometry(rocket.radius * 1.01, rocket.radius * 1.01, 0.20, 24);
+            canardBandGeo.translate(0, 0.5 * rocket.height - 1.18, 0);
+            const canardBand = new THREE.Mesh(canardBandGeo, new THREE.MeshStandardMaterial({ color: 0x97a3af, roughness: 0.56 }));
+            canardBand.castShadow = true;
+            rocketMesh.add(canardBand);
+
+            const canardShape = new THREE.Shape();
+            canardShape.moveTo(0.0, 0.0);
+            canardShape.lineTo(0.38, 0.05);
+            canardShape.lineTo(0.08, 0.34);
+            canardShape.lineTo(0.0, 0.26);
+            canardShape.closePath();
+
+            const canardGeo = new THREE.ExtrudeGeometry(canardShape, { depth: 0.035, bevelEnabled: false });
+            canardGeo.translate(rocket.radius - 0.015, 0.5 * rocket.height - 1.28, -0.0175);
+
+            for (let i = 0; i < 3; i++) {
+                const canard = new THREE.Mesh(canardGeo, canardMat);
+                canard.rotation.y = i * (Math.PI * 2.0 / 3.0);
+                canard.castShadow = true;
+                rocketMesh.add(canard);
+            }
+
+            engineGroup = new THREE.Group();
+            engineGroup.position.copy(rocket.enginePivotBody);
+
+            const bellGeo = new THREE.CylinderGeometry(0.1, rocket.radius * 0.7, 0.4, 16);
+            bellGeo.translate(0, -0.2, 0);
+            const bellMat = new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 0.8 });
+            const bell = new THREE.Mesh(bellGeo, bellMat);
+            engineGroup.add(bell);
+
+            const thrustGeo = new THREE.ConeGeometry(rocket.radius * 0.6, 2.0, 16);
+            thrustGeo.translate(0, -1.0, 0);
+            const thrustMat = new THREE.MeshBasicMaterial({ color: 0xffaa28, transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending });
+            thrustMesh = new THREE.Mesh(thrustGeo, thrustMat);
+            engineGroup.add(thrustMesh);
+
+            const arrowDir = new THREE.Vector3(0, -1, 0);
+            const arrowOrigin = new THREE.Vector3(0, 0, 0);
+            gimbalArrow = new THREE.ArrowHelper(arrowDir, arrowOrigin, 3.0, 0x00ffcc, 0.6, 0.3);
+            engineGroup.add(gimbalArrow);
+
+            rocketMesh.add(engineGroup);
+            scene.add(rocketMesh);
+        }
+
+        function makePlanePrototype(bodyColor, accentColor) {
+            const planeGeo = new THREE.Group();
+
+            const fuse = new THREE.Mesh(
+                new THREE.CylinderGeometry(1, 1, 10, 8),
+                new THREE.MeshStandardMaterial({ color: bodyColor })
+            );
+            fuse.rotation.x = Math.PI / 2;
+            planeGeo.add(fuse);
+
+            const wings = new THREE.Mesh(
+                new THREE.BoxGeometry(15, 0.2, 2.5),
+                new THREE.MeshStandardMaterial({ color: accentColor })
+            );
+            planeGeo.add(wings);
+
+            const tail = new THREE.Mesh(
+                new THREE.BoxGeometry(4, 0.2, 1.5),
+                new THREE.MeshStandardMaterial({ color: accentColor })
+            );
+            tail.position.set(0, 0, -4);
+            planeGeo.add(tail);
+
+            const fin = new THREE.Mesh(
+                new THREE.BoxGeometry(0.2, 2, 1.5),
+                new THREE.MeshStandardMaterial({ color: accentColor })
+            );
+            fin.position.set(0, 1, -4);
+            planeGeo.add(fin);
+
+            return planeGeo;
+        }
+
+        function buildAirplanes() {
+            const straightProto = makePlanePrototype(0xeeeeee, 0xcc2222);
+            const weavingProto = makePlanePrototype(0xffd89a, 0x2f7aff);
+
+            for (let i = 0; i < NUM_PLANES; i++) {
+                let type = i < NUM_PLANES / 2 ? 'straight' : 'weave';
+                let p = (type === 'straight' ? straightProto : weavingProto).clone();
+                scene.add(p);
+                let plane = {
+                    mesh: p,
+                    type,
+                    alive: true,
+                    radius: PLANE_COLLISION_RADIUS,
+                    respawnTimer: 0.0,
+                    vel: new THREE.Vector3(),
+                    speed: 0.0,
+                    heading: 0.0,
+                    turnRate: 0.0,
+                    courseTimer: 0.0,
+                    baseAlt: 0.0,
+                    bobPhase: Math.random() * Math.PI * 2.0,
+                    reset: function() {
+                        let angle = Math.random() * Math.PI * 2.0;
+                        let radius = randRange(600.0, WORLD_RADIUS * 0.95);
+                        this.mesh.position.set(Math.cos(angle) * radius, 0.0, Math.sin(angle) * radius);
+                        this.baseAlt = this.type === 'straight' ? randRange(360.0, 680.0) : randRange(280.0, 600.0);
+                        this.mesh.position.y = Math.max(getGroundHeight(this.mesh.position.x, this.mesh.position.z) + 240.0, this.baseAlt);
+                        this.heading = Math.random() * Math.PI * 2.0;
+                        this.speed = this.type === 'straight' ? randRange(50.0, 72.0) : randRange(42.0, 68.0);
+                        this.turnRate = 0.0;
+                        this.courseTimer = randRange(0.6, 1.8);
+                        this.alive = true;
+                        this.respawnTimer = 0.0;
+                        this.mesh.visible = true;
+                        this.vel.set(Math.cos(this.heading), 0.0, Math.sin(this.heading)).multiplyScalar(this.speed);
+                        this.mesh.lookAt(this.mesh.position.clone().add(this.vel));
+                    },
+                    update: function(dt, t) {
+                        if (!this.alive) {
+                            this.respawnTimer -= dt;
+                            if (this.respawnTimer <= 0.0) this.reset();
+                            return;
+                        }
+
+                        if (this.type === 'weave') {
+                            this.courseTimer -= dt;
+                            if (this.courseTimer <= 0.0) {
+                                this.courseTimer = randRange(0.5, 1.6);
+                                this.turnRate = randRange(-0.70, 0.70);
+                            }
+                        } else {
+                            this.turnRate = 0.0;
+                        }
+
+                        let prevPos = this.mesh.position.clone();
+                        this.heading += this.turnRate * dt;
+                        let horizontalVel = new THREE.Vector3(Math.cos(this.heading), 0.0, Math.sin(this.heading)).multiplyScalar(this.speed);
+                        this.mesh.position.addScaledVector(horizontalVel, dt);
+
+                        let terrainSafeAlt = getGroundHeight(this.mesh.position.x, this.mesh.position.z) + (this.type === 'straight' ? 240.0 : 190.0);
+                        let bob = Math.sin(t * (this.type === 'straight' ? 0.35 : 1.25) + this.bobPhase) * (this.type === 'straight' ? 5.0 : 10.0);
+                        this.mesh.position.y = Math.max(terrainSafeAlt, this.baseAlt + bob);
+
+                        if (this.mesh.position.length() > WORLD_RADIUS) {
+                            this.reset();
+                            return;
+                        }
+
+                        this.vel.copy(this.mesh.position).sub(prevPos).multiplyScalar(1.0 / Math.max(dt, 1e-6));
+                        let lookTarget = this.mesh.position.clone().add(this.vel);
+                        lookTarget.y = this.mesh.position.y + Math.sin(t * 0.7 + this.bobPhase) * 1.5;
+                        this.mesh.lookAt(lookTarget);
+                    }
+                };
+                planes.push(plane);
+                plane.reset();
+            }
+        }
+
+        function buildTargetingViz() {
+            const lineGeo = new THREE.BufferGeometry();
+            lineGeo.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 0, 0, 0], 3));
+
+            const lineMat = new THREE.LineBasicMaterial({
+                color: 0xff3344,
+                transparent: true,
+                opacity: 0.95,
+                depthTest: false
+            });
+            targetLine = new THREE.Line(lineGeo, lineMat);
+            targetLine.visible = false;
+            targetLine.frustumCulled = false;
+            targetLine.renderOrder = 10;
+            scene.add(targetLine);
+
+            const markerGeo = new THREE.SphereGeometry(2.0, 16, 16);
+            const markerMat = new THREE.MeshBasicMaterial({
+                color: 0xff3344,
+                transparent: true,
+                opacity: 0.75,
+                depthTest: false
+            });
+            targetMarker = new THREE.Mesh(markerGeo, markerMat);
+            targetMarker.visible = false;
+            targetMarker.frustumCulled = false;
+            targetMarker.renderOrder = 10;
+            scene.add(targetMarker);
+        }
+
+        function updateTargetingViz() {
+            if (!targeting.enabled || rocket.destroyed) {
+                targetLine.visible = false;
+                targetMarker.visible = false;
+                return;
+            }
+
+            if (!targeting.hasPrediction) {
+                targetLine.visible = false;
+                targetMarker.visible = false;
+                return;
+            }
+
+            let aimOrigin = getRocketAimOrigin();
+            let pos = targetLine.geometry.attributes.position.array;
+            pos[0] = aimOrigin.x;
+            pos[1] = aimOrigin.y;
+            pos[2] = aimOrigin.z;
+            pos[3] = targeting.trajectoryPoint.x;
+            pos[4] = targeting.trajectoryPoint.y;
+            pos[5] = targeting.trajectoryPoint.z;
+            targetLine.geometry.attributes.position.needsUpdate = true;
+
+            targetLine.visible = true;
+            targetMarker.visible = true;
+            targetMarker.position.copy(targeting.predictedPoint);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function resetFollowCamera() {
+            cameraMode = 'follow';
+            followCameraTarget.copy(rocket.pos);
+            controls.target.copy(followCameraTarget);
+            camera.position.copy(followCameraTarget).add(FOLLOW_CAMERA_DEFAULT_OFFSET);
+            controls.update();
+        }
+
+        // --- Input Handling ---
+        const keys = {};
+        const gimbalKeys = new Set(['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight']);
+        window.addEventListener('keydown', e => {
+            if (gimbalKeys.has(e.code)) e.preventDefault();
+            keys[e.code] = true;
+        });
+        window.addEventListener('keyup', e => keys[e.code] = false);
+
+        let paused = false;
+        let showHelp = true;
+        let cameraMode = 'follow';
+
+        window.addEventListener('keydown', e => {
+            if (e.code === 'KeyP') paused = !paused;
+            if (e.code === 'Tab') {
+                e.preventDefault();
+                showHelp = !showHelp;
+                document.getElementById('help-text').classList.toggle('hidden', !showHelp);
+                document.getElementById('ui-status').innerText = showHelp ? "TAB: hide help" : "TAB: show help";
+            }
+            if (e.code === 'KeyR') {
+                rocket.reset();
+                rocketMesh.visible = true;
+                resetTargetingController();
+                clearExplosions();
+                resetFollowCamera();
+            }
+            if (e.code === 'KeyY') {
+                rocket.gimbalXCmd = 0;
+                rocket.gimbalZCmd = 0;
+                rocket.canardXCmd = 0;
+                rocket.canardZCmd = 0;
+                resetTargetingController();
+            }
+            if (e.code === 'KeyZ') rocket.throttleCmd = 0;
+            if (e.code === 'KeyT') setTargetingEnabled(!targeting.enabled);
+            if (e.code === 'KeyN') cycleTarget();
+            if (e.code === 'KeyC') { 
+                resetFollowCamera();
+            }
+        });
+
+        // --- Main Loop ---
+        let lastTime = performance.now() / 1000.0;
+        let accumulator = 0.0;
+        let simTime = 0.0;
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            let time = performance.now() / 1000.0;
+            let frameDt = time - lastTime;
+            lastTime = time;
+            if (frameDt > MAX_FRAME_DT) frameDt = MAX_FRAME_DT;
+
+            let throttleRate = 0.70;
+            if (!targeting.enabled) {
+                if (keys['KeyQ']) rocket.throttleCmd += throttleRate * frameDt;
+                if (keys['KeyE']) rocket.throttleCmd -= throttleRate * frameDt;
+                rocket.throttleCmd = clamp(rocket.throttleCmd, 0.0, 1.0);
+            }
+
+            if (!targeting.enabled) {
+                let gimbalRate = GIMBAL_RATE_DEG * DEG2RAD;
+                if (keys['ArrowUp']) rocket.gimbalXCmd += gimbalRate * frameDt;
+                if (keys['ArrowDown']) rocket.gimbalXCmd -= gimbalRate * frameDt;
+                if (keys['ArrowLeft']) rocket.gimbalZCmd += gimbalRate * frameDt;
+                if (keys['ArrowRight']) rocket.gimbalZCmd -= gimbalRate * frameDt;
+            }
+
+            let cone = Math.sqrt(rocket.gimbalXCmd * rocket.gimbalXCmd + rocket.gimbalZCmd * rocket.gimbalZCmd);
+            if (cone > rocket.gimbalLimit && cone > 1e-6) {
+                let s = rocket.gimbalLimit / cone;
+                rocket.gimbalXCmd *= s;
+                rocket.gimbalZCmd *= s;
+            }
+
+            if (!targeting.enabled) {
+                rocket.canardXCmd = clamp(rocket.gimbalXCmd * (rocket.canardLimit / rocket.gimbalLimit), -rocket.canardLimit, rocket.canardLimit);
+                rocket.canardZCmd = clamp(rocket.gimbalZCmd * (rocket.canardLimit / rocket.gimbalLimit), -rocket.canardLimit, rocket.canardLimit);
+            }
+
+            let keyPan = 20.0 * frameDt;
+            let forward = new THREE.Vector3();
+            camera.getWorldDirection(forward);
+            forward.y = 0; forward.normalize();
+            let right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0,1,0)).normalize();
+
+            let isPanning = false;
+            if (keys['KeyW']) { controls.target.addScaledVector(forward, keyPan); camera.position.addScaledVector(forward, keyPan); isPanning = true; }
+            if (keys['KeyS']) { controls.target.addScaledVector(forward, -keyPan); camera.position.addScaledVector(forward, -keyPan); isPanning = true; }
+            if (keys['KeyA']) { controls.target.addScaledVector(right, -keyPan); camera.position.addScaledVector(right, -keyPan); isPanning = true; }
+            if (keys['KeyD']) { controls.target.addScaledVector(right, keyPan); camera.position.addScaledVector(right, keyPan); isPanning = true; }
+            if (keys['Space']) { controls.target.y += keyPan; camera.position.y += keyPan; isPanning = true; }
+            if (keys['ShiftLeft']) { controls.target.y -= keyPan; camera.position.y -= keyPan; isPanning = true; }
+
+            if (isPanning) cameraMode = 'free';
+
+            controls.enableDamping = true;
+            controls.enablePan = cameraMode === 'free';
+            controls.update();
+
+            if (!paused) {
+                accumulator += frameDt;
+                while (accumulator >= FIXED_DT) {
+                    planes.forEach(p => p.update(FIXED_DT, simTime));
+                    updateTargetPrediction(simTime);
+                    updateTargetingController(FIXED_DT);
+                    stepPhysics(rocket, simTime, FIXED_DT);
+                    checkRocketPlaneCollisions();
+                    simTime += FIXED_DT;
+                    accumulator -= FIXED_DT;
+                }
+            }
+
+            if (!paused) updateExplosions(frameDt);
+
+            if (!rocket.destroyed) {
+                rocketMesh.position.copy(rocket.pos);
+                rocketMesh.quaternion.copy(rocket.q);
+            }
+
+            if (cameraMode === 'follow') {
+                let orbitOffset = camera.position.clone().sub(controls.target);
+                followCameraTarget.copy(rocket.pos);
+                controls.target.copy(followCameraTarget);
+                camera.position.copy(followCameraTarget).add(orbitOffset);
+            }
+            
+            engineGroup.rotation.set(rocket.gimbalX, 0, rocket.gimbalZ, 'ZYX');
+            
+            thrustMesh.scale.y = rocket.throttle * 2.0;
+            thrustMesh.scale.x = thrustMesh.scale.z = 0.5 + rocket.throttle * 0.5;
+            thrustMesh.visible = !rocket.destroyed && rocket.throttle > 0.01;
+            
+            if(thrustMesh.visible) {
+                thrustMesh.scale.y *= (0.9 + Math.random() * 0.2);
+            }
+
+            updateTargetingViz();
+
+            document.getElementById('ui-thr').innerText = `Thr ${(rocket.throttle * 100).toFixed(0)}%`;
+            document.getElementById('ui-gx').innerText = `Gx ${(rocket.gimbalX * RAD2DEG).toFixed(1)}°`;
+            document.getElementById('ui-gz').innerText = `Gz ${(rocket.gimbalZ * RAD2DEG).toFixed(1)}°`;
+            
+            document.getElementById('ui-alt').innerText = `Alt ${rocket.pos.y.toFixed(2)} m`;
+            document.getElementById('ui-air').innerText = `Air ${telem.airspeed.toFixed(2)} m/s`;
+            document.getElementById('ui-rho').innerText = `rho ${telem.rho.toFixed(3)}`;
+            
+            document.getElementById('ui-vel').innerText = `Vel (${rocket.vel.x.toFixed(2)}, ${rocket.vel.y.toFixed(2)}, ${rocket.vel.z.toFixed(2)})`;
+            document.getElementById('ui-rate').innerText = `Rate (${rocket.omega.x.toFixed(2)}, ${rocket.omega.y.toFixed(2)}, ${rocket.omega.z.toFixed(2)})`;
+            let targetEl = document.getElementById('ui-target');
+            let gncEl = document.getElementById('ui-gnc');
+            if (targeting.enabled && targeting.hasPrediction && targeting.targetIndex >= 0) {
+                targetEl.innerText = `Target P${targeting.targetIndex + 1}  ${targeting.targetDistance.toFixed(0)} m  ${targeting.interceptTime.toFixed(1)} s  ${targeting.guidanceMode}  Thr ${(rocket.throttleCmd * 100).toFixed(0)}%`;
+                targetEl.className = "text-sm mb-3 text-red-300";
+                gncEl.innerText = `PN guidance  spd ${rocket.vel.length().toFixed(0)} m/s  alt ${rocket.pos.y.toFixed(0)} m`;
+                gncEl.className = "text-xs mb-3 text-cyan-200";
+            } else if (targeting.enabled) {
+                targetEl.innerText = `Target ON / ThrCmd ${(rocket.throttleCmd * 100).toFixed(0)}%`;
+                targetEl.className = "text-sm mb-3 text-red-300";
+                gncEl.innerText = "Acquiring target...";
+                gncEl.className = "text-xs mb-3 text-cyan-200";
+            } else {
+                targetEl.innerText = "Target OFF";
+                targetEl.className = "text-sm mb-3 text-gray-300";
+                gncEl.innerText = "Manual control";
+                gncEl.className = "text-xs mb-3 text-cyan-200";
+            }
+
+            let camEl = document.getElementById('ui-cam');
+            if(cameraMode === 'follow') {
+                camEl.innerText = "Cam: Follow";
+                camEl.className = "text-green-400";
+            } else {
+                camEl.innerText = "Cam: Free";
+                camEl.className = "text-yellow-400";
+            }
+
+            if (rocket.destroyed) {
+                document.getElementById('ui-status').innerText = "Rocket destroyed (Press R to reset)";
+                document.getElementById('ui-status').classList.add("text-orange-400");
+            } else if(paused) {
+                document.getElementById('ui-status').innerText = "Paused (Press P to resume)";
+                document.getElementById('ui-status').classList.add("text-orange-400");
+            } else {
+                document.getElementById('ui-status').innerText = showHelp ? "TAB: hide help" : "TAB: show help";
+                document.getElementById('ui-status').classList.remove("text-orange-400");
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        window.onload = () => {
+            init3D();
+            animate();
+        };
+
+    </script>
+</body>
+</html>
