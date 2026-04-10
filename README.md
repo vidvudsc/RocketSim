@@ -2,7 +2,9 @@
 
 Browser rocket intercept sandbox built with plain Three.js and a single HTML file.
 
-The sim launches a slender rocket from a pad, lets you fly it manually with thrust vector control, and can switch into an auto-target mode that chases moving aircraft using a real guidance loop. The HUD includes a live guidance panel that shows values coming from the active controller, not placeholder telemetry.
+The sim launches a rocket from a pad, lets you fly it manually with thrust vector control, and can switch into an auto-target mode that chases moving aircraft using a real guidance loop. The HUD includes a live guidance panel that shows values coming from the active controller, not placeholder telemetry. 
+
+You can use it at https://rocketsim.vidvuds.com/ on my website.
 
 ## Preview
 
