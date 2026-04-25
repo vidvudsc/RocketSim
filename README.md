@@ -1,28 +1,25 @@
 # RocketSim
 
-Browser rocket intercept sandbox built with plain Three.js and a single HTML file.
+This repo now contains two intercept sims:
 
-The sim launches a rocket from a pad, lets you fly it manually with thrust vector control, and can switch into an auto-target mode that chases moving aircraft using a real guidance loop. The HUD includes a live guidance panel that shows values coming from the active controller, not placeholder telemetry. 
+- A browser version in [index.html](/Users/vidvudscalitis/Desktop/CODING/3dRocket/index.html) built with plain Three.js
+- A native C + raylib version in [c](/Users/vidvudscalitis/Desktop/CODING/3dRocket/c)
 
-You can use it at https://rocketsim.vidvuds.com/ on my website.
+The browser version is still available at [rocketsim.vidvuds.com](https://rocketsim.vidvuds.com/).
 
-## Preview
+## Browser Sim
+
+The original browser sim launches a rocket from a pad, supports manual thrust-vector control, and can switch into an auto-target mode that chases moving aircraft with a real guidance loop. The HUD exposes live guidance values instead of placeholder telemetry.
+
+### Browser Preview
 
 ![RocketSim stand view](docs/stand.png)
 
-### Plane targeting
 ![Plane targeting](docs/close.png)
 
 ![](docs/closer.png)
 
-## What It Does
-
-- Manual flight with throttle and thrust-vector control
-- Auto-target intercept mode against moving aircraft
-- Aerodynamic canards, fin stabilization, and terrain-aware guidance
-- Follow/free camera plus a live guidance HUD
-
-## Controls
+### Browser Controls
 
 - `Q / E`: throttle up or down
 - `Arrow keys`: manual gimbal
@@ -39,38 +36,44 @@ You can use it at https://rocketsim.vidvuds.com/ on my website.
 - `I`: toggle guidance panel
 - `Tab`: toggle help
 
-## Control Loop
+### Browser Guidance
 
-The real guidance logic is in [`index.html`](index.html), mainly:
+The main browser guidance loop lives in [index.html](/Users/vidvudscalitis/Desktop/CODING/3dRocket/index.html), primarily:
 
 - `updateTargetPrediction()`
 - `updateTargetingController()`
 - `computeActuatorCommandsForDesiredAxis()`
 - `stepPhysics()`
 
-The sim runs at a fixed `240 Hz` step. Each step:
+The browser sim runs at a fixed `240 Hz` step. Each step updates target aircraft, predicts intercept, builds a guidance acceleration command, converts it into TVC/canard commands, and applies forces and torques.
 
-1. updates target aircraft
-2. predicts the intercept point
-3. builds a guidance acceleration command
-4. turns that into gimbal and canard commands
-5. applies forces and torques in physics
+## C + raylib Sim
 
-In short:
+The native sim in [c](/Users/vidvudscalitis/Desktop/CODING/3dRocket/c) is a ground-to-air missile intercept sandbox. It loads the included missile model, uses the low-poly MIG STL target, predicts an intercept point, and flies the missile against a moving aircraft with simplified atmosphere, drag, thrust, and turn-limit modeling.
 
-- `updateTargetPrediction()` filters target velocity and estimates a lead point
-- `updateTargetingController()` mixes PN-style steering, direct terminal pursuit, speed control, and terrain clearance
-- `computeActuatorCommandsForDesiredAxis()` converts desired attitude into TVC and canard commands
-- `stepPhysics()` applies thrust, aero, canard/fin forces, angular response, and ground contact
+### C Sim Preview
 
-## Guidance Panel
+![Ground launch view](docs/groundC.png)
 
-The guidance panel shows live values from the active loop, including:
+![Intercept view](docs/interceptC.png)
 
-- mode, range, `tgo`, and closing speed
-- LOS rate and direct-pursuit blend
-- lateral command versus limit
-- speed target and throttle command
-- TVC/canard commands and terrain margin
+![Close-up view](docs/closeupC.png)
 
-If it is hidden, press `I`.
+### Build and Run
+
+```sh
+cd /Users/vidvudscalitis/Desktop/CODING/3dRocket/c
+make
+./rocket_sim
+```
+
+### C Sim Controls
+
+- `I`: launch interceptor
+- `Space`: pause or resume
+- `Left / Right`: halve or double time scale
+- `Down`: set time scale to `0.10x`
+- `Up`: reset time scale to `1.00x`
+- Double-click window: toggle borderless fit-to-screen
+- Mouse drag: orbit camera around the missile
+- Mouse wheel: zoom
