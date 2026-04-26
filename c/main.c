@@ -10,11 +10,15 @@
 
 #define SCREEN_WIDTH 1280
 #define SCREEN_HEIGHT 720
-#define TRAIL_MAX 420
+#define TRAIL_MAX 2400
 #define GRID_EXTENT 9000
 #define GRID_STEP 500
 #define LAUNCH_POS V3(0.0f, 7.5f, 0.0f)
 #define CHART_SAMPLES 180
+#define MAX_AIRCRAFT 6
+#define RADAR_X 110
+#define RADAR_Y 540
+#define RADAR_R 100
 
 typedef enum SimPhase {
     PHASE_READY,
@@ -45,6 +49,7 @@ typedef struct Missile {
     float lateralDemand;
     float dragAccel;
     float thrustAccel;
+    float trailTimer;
     bool active;
 } Missile;
 
@@ -201,8 +206,6 @@ static void DrawBezier3D(Vector3 p0, Vector3 p1, Vector3 p2, Vector3 p3, Color c
 
 static void AddTrailPoint(Trail *trail, Vector3 point)
 {
-    if (trail->count > 0 && Vector3Distance(trail->points[trail->count - 1], point) < 0.55f) return;
-
     if (trail->count < TRAIL_MAX) {
         trail->points[trail->count++] = point;
         return;
@@ -645,7 +648,7 @@ static void DrawPrediction(Missile missile, Aircraft aircraft, Vector3 intercept
     Vector3 missileDir = Vector3Normalize(Vector3Subtract(interceptPoint, missileStart));
     Vector3 aheadA = Vector3Add(missileStart, Vector3Scale(missileDir, 18.0f));
     Vector3 aheadB = Vector3Add(interceptPoint, V3(0.0f, 8.0f, 0.0f));
-    DrawBezier3D(missileStart, aheadA, aheadB, interceptPoint, Fade(ORANGE, 0.92f));
+    DrawBezier3D(missileStart, aheadA, aheadB, interceptPoint, Fade(RED, 0.92f));
 
     Vector3 targetPast = Vector3Subtract(aircraft.position, Vector3Scale(aircraft.velocity, 2.4f));
     Vector3 targetFuture = Vector3Add(aircraft.position, Vector3Scale(aircraft.velocity, interceptTime));
@@ -723,6 +726,42 @@ static void DrawChart(const char *label, const float values[CHART_SAMPLES], int 
     }
 }
 
+static void DrawRadarScreen(Aircraft *aircrafts, int count, int selected, Vector3 launchPos)
+{
+    DrawCircle(RADAR_X, RADAR_Y, RADAR_R, Fade(BLACK, 0.72f));
+    DrawCircleLines(RADAR_X, RADAR_Y, RADAR_R, Fade(GREEN, 0.85f));
+    DrawCircleLines(RADAR_X, RADAR_Y, RADAR_R * 0.66f, Fade(GREEN, 0.4f));
+    DrawCircleLines(RADAR_X, RADAR_Y, RADAR_R * 0.33f, Fade(GREEN, 0.4f));
+
+    DrawLine(RADAR_X - RADAR_R, RADAR_Y, RADAR_X + RADAR_R, RADAR_Y, Fade(GREEN, 0.3f));
+    DrawLine(RADAR_X, RADAR_Y - RADAR_R, RADAR_X, RADAR_Y + RADAR_R, Fade(GREEN, 0.3f));
+
+    float maxRange = 6500.0f;
+    for (int i = 0; i < count; i++) {
+        float dx = aircrafts[i].position.x - launchPos.x;
+        float dz = aircrafts[i].position.z - launchPos.z;
+        float dist = sqrtf(dx * dx + dz * dz);
+        if (dist > maxRange) continue;
+
+        float rx = (dx / maxRange) * RADAR_R;
+        float ry = (dz / maxRange) * RADAR_R;
+        int bx = (int)(RADAR_X + rx);
+        int by = (int)(RADAR_Y + ry);
+
+        Color blipColor = (i == selected) ? RED : GREEN;
+        int radius = (i == selected) ? 5 : 3;
+        DrawCircle(bx, by, radius, blipColor);
+        if (i == selected) {
+            DrawCircleLines(bx, by, 9, Fade(RED, 0.8f));
+        }
+    }
+
+    DrawCircle(RADAR_X, RADAR_Y, 3, YELLOW);
+
+    DrawText("RADAR", RADAR_X - 28, RADAR_Y - RADAR_R - 18, 16, Fade(GREEN, 0.9f));
+    DrawText("TAB: cycle target", RADAR_X - 55, RADAR_Y + RADAR_R + 6, 14, Fade(RAYWHITE, 0.7f));
+}
+
 static void DrawHud(SimPhase phase, bool paused, float timeScale, Aircraft aircraft, Missile missile, float interceptTime,
                     Telemetry telemetry, Charts charts)
 {
@@ -775,7 +814,7 @@ static void DrawHud(SimPhase phase, bool paused, float timeScale, Aircraft aircr
         statusColor = RED;
     }
     DrawText(status, 18, screenHeight - 34, 20, statusColor);
-    DrawText("I launch  SPACE pause  Arrow keys time  Mouse orbit", screenWidth - 560, screenHeight - 34, 20, Fade(RAYWHITE, 0.78f));
+    DrawText("I launch  SPACE pause  Arrow keys time  TAB target  Mouse orbit", screenWidth - 660, screenHeight - 34, 20, Fade(RAYWHITE, 0.78f));
 }
 
 int main(void)
@@ -815,7 +854,9 @@ int main(void)
         .target = LAUNCH_POS
     };
 
-    Aircraft aircraft = SpawnAircraft();
+    Aircraft aircrafts[MAX_AIRCRAFT];
+    for (int i = 0; i < MAX_AIRCRAFT; i++) aircrafts[i] = SpawnAircraft();
+    int selectedAircraft = 0;
     Missile missile = {
         .position = LAUNCH_POS,
         .previousPosition = LAUNCH_POS,
@@ -852,6 +893,7 @@ int main(void)
         if (IsKeyPressed(KEY_RIGHT)) timeScale = ClampFloat(timeScale * 2.0f, 0.05f, 4.0f);
         if (IsKeyPressed(KEY_DOWN)) timeScale = 0.10f;
         if (IsKeyPressed(KEY_UP)) timeScale = 1.0f;
+        if (IsKeyPressed(KEY_TAB)) selectedAircraft = (selectedAircraft + 1) % MAX_AIRCRAFT;
 
         float simDt = paused ? 0.0f : dt * timeScale;
 
@@ -868,16 +910,19 @@ int main(void)
             missile.lateralDemand = 0.0f;
             missile.dragAccel = 0.0f;
             missile.thrustAccel = 0.0f;
+            missile.trailTimer = 0.0f;
             missile.active = true;
             trail.count = 0;
             charts = (Charts){ 0 };
         }
 
-        if (!paused) UpdateAircraft(&aircraft, simDt);
+        if (!paused) {
+            for (int i = 0; i < MAX_AIRCRAFT; i++) UpdateAircraft(&aircrafts[i], simDt);
+        }
 
         interceptPoint = PredictInterceptPoint(missile.active ? missile.position : LAUNCH_POS,
-                                               aircraft.position,
-                                               aircraft.velocity,
+                                               aircrafts[selectedAircraft].position,
+                                               aircrafts[selectedAircraft].velocity,
                                                missile.active ? fmaxf(missile.speed, 1250.0f) : 1300.0f,
                                                &interceptTime);
 
@@ -885,12 +930,12 @@ int main(void)
             missile.age += simDt;
             missile.previousPosition = missile.position;
 
-            Vector3 toTarget = Vector3Subtract(aircraft.position, missile.position);
+            Vector3 toTarget = Vector3Subtract(aircrafts[selectedAircraft].position, missile.position);
             Vector3 lineOfSight = Vector3Normalize(toTarget);
-            float closingSpeed = fmaxf(8.0f, -Vector3DotProduct(Vector3Subtract(aircraft.velocity, missile.velocity), lineOfSight));
+            float closingSpeed = fmaxf(8.0f, -Vector3DotProduct(Vector3Subtract(aircrafts[selectedAircraft].velocity, missile.velocity), lineOfSight));
             float range = Vector3Length(toTarget);
             float dynamicLead = ClampFloat(range / closingSpeed, 0.10f, 30.0f);
-            Vector3 leadPoint = Vector3Add(aircraft.position, Vector3Scale(aircraft.velocity, dynamicLead));
+            Vector3 leadPoint = Vector3Add(aircrafts[selectedAircraft].position, Vector3Scale(aircrafts[selectedAircraft].velocity, dynamicLead));
             Vector3 leadDirection = Vector3Normalize(Vector3Subtract(leadPoint, missile.position));
             Vector3 interceptDirection = Vector3Normalize(Vector3Subtract(interceptPoint, missile.position));
             float terminalBlend = 1.0f - SmoothStep(320.0f, 900.0f, range);
@@ -918,7 +963,11 @@ int main(void)
             missile.speed = ClampFloat(missile.speed + speedDot * simDt, 430.0f, 1900.0f);
             missile.velocity = Vector3Scale(missile.forward, missile.speed);
             missile.position = Vector3Add(missile.position, Vector3Scale(missile.velocity, simDt));
-            AddTrailPoint(&trail, missile.position);
+            missile.trailTimer += simDt;
+            if (missile.trailTimer >= 0.016f) {
+                missile.trailTimer = 0.0f;
+                AddTrailPoint(&trail, missile.position);
+            }
             charts.timer += dt;
             if (charts.timer >= 0.05f) {
                 charts.timer = 0.0f;
@@ -934,10 +983,10 @@ int main(void)
             telemetry.losRateDeg = missile.lateralDemand / fmaxf(missile.speed, 1.0f) * RAD2DEG;
 
             float distanceToTarget = DistanceSegmentSegment(missile.previousPosition, missile.position,
-                                                            aircraft.previousPosition, aircraft.position);
+                                                            aircrafts[selectedAircraft].previousPosition, aircrafts[selectedAircraft].position);
             if (distanceToTarget < 75.0f) {
-                explosionPosition = aircraft.position;
-                aircraft = SpawnAircraft();
+                explosionPosition = aircrafts[selectedAircraft].position;
+                aircrafts[selectedAircraft] = SpawnAircraft();
                 phase = PHASE_HIT;
                 missile.active = false;
                 resultTimer = 0.0f;
@@ -972,7 +1021,7 @@ int main(void)
             telemetry.turnLimit = 0.0f;
         }
 
-        UpdateOrbitCamera(&camera, &cameraRig, missile, aircraft, phase);
+        UpdateOrbitCamera(&camera, &cameraRig, missile, aircrafts[selectedAircraft], phase);
 
         BeginDrawing();
         ClearBackground((Color){ 64, 142, 218, 255 });
@@ -982,10 +1031,13 @@ int main(void)
         DrawPlane(V3(0.0f, -0.01f, 0.0f), (Vector2){ 18000.0f, 18000.0f }, (Color){ 55, 74, 58, 255 });
         DrawGroundGrid();
 
-        DrawCircle3D(aircraft.center, aircraft.radius, V3(1.0f, 0.0f, 0.0f), 90.0f, Fade(SKYBLUE, 0.24f));
-        DrawPrediction(missile, aircraft, interceptPoint, interceptTime);
-        DrawTrail(trail, ORANGE);
-        DrawAircraft(aircraft, hasPlaneModel ? &planeModel : NULL);
+        DrawCircle3D(aircrafts[selectedAircraft].center, aircrafts[selectedAircraft].radius, V3(1.0f, 0.0f, 0.0f), 90.0f, Fade(SKYBLUE, 0.24f));
+        DrawPrediction(missile, aircrafts[selectedAircraft], interceptPoint, interceptTime);
+        DrawTrail(trail, YELLOW);
+        for (int i = 0; i < MAX_AIRCRAFT; i++) {
+            DrawAircraft(aircrafts[i], hasPlaneModel ? &planeModel : NULL);
+        }
+        DrawSphereWires(aircrafts[selectedAircraft].position, 14.0f, 12, 12, Fade(RED, 0.35f));
 
         if (missile.active || phase == PHASE_READY || phase == PHASE_MISSED) {
             DrawModelFacing(missileModel, missile.position, missile.forward, WHITE);
@@ -997,7 +1049,8 @@ int main(void)
         }
 
         EndMode3D();
-        DrawHud(phase, paused, timeScale, aircraft, missile, interceptTime, telemetry, charts);
+        DrawHud(phase, paused, timeScale, aircrafts[selectedAircraft], missile, interceptTime, telemetry, charts);
+        DrawRadarScreen(aircrafts, MAX_AIRCRAFT, selectedAircraft, LAUNCH_POS);
         DrawFPS(GetScreenWidth() - 96, 16);
         EndDrawing();
     }
