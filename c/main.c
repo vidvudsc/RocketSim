@@ -36,6 +36,11 @@ typedef struct Aircraft {
     Vector3 previousPosition;
     Vector3 position;
     Vector3 velocity;
+    bool evading;
+    Vector3 waypoints[8];
+    int waypointCount;
+    int waypointIndex;
+    float maneuverPhase;
 } Aircraft;
 
 typedef struct Missile {
@@ -255,16 +260,90 @@ static Aircraft SpawnAircraft(void)
     return aircraft;
 }
 
+static void GenerateEvadingWaypoints(Aircraft *a)
+{
+    a->waypointCount = 6 + GetRandomValue(0, 2);
+    Vector3 current = a->position;
+    for (int i = 0; i < a->waypointCount; i++) {
+        current.x += RandomFloat(-1400.0f, 1400.0f);
+        current.z += RandomFloat(-1400.0f, 1400.0f);
+        float alt = a->altitude + RandomFloat(-900.0f, 900.0f);
+        alt = ClampFloat(alt, 1600.0f, 5800.0f);
+        a->waypoints[i] = V3(current.x, alt, current.z);
+    }
+}
+
+static Aircraft SpawnEvadingAircraft(void)
+{
+    Aircraft aircraft = { 0 };
+    aircraft.center = V3(RandomFloat(-750.0f, 750.0f), 0.0f, RandomFloat(-750.0f, 750.0f));
+    aircraft.radius = RandomFloat(2600.0f, 4300.0f);
+    aircraft.altitude = RandomFloat(2200.0f, 5200.0f);
+    aircraft.angle = RandomFloat(0.0f, PI * 2.0f);
+    float fighterSpeed = RandomFloat(230.0f, 280.0f);
+    aircraft.angularSpeed = fighterSpeed / aircraft.radius;
+    if (GetRandomValue(0, 1) == 0) aircraft.angularSpeed *= -1.0f;
+    aircraft.position = V3(aircraft.center.x + cosf(aircraft.angle) * aircraft.radius,
+                           aircraft.altitude,
+                           aircraft.center.z + sinf(aircraft.angle) * aircraft.radius);
+    aircraft.velocity = V3(-sinf(aircraft.angle) * aircraft.radius * aircraft.angularSpeed,
+                           0.0f,
+                           cosf(aircraft.angle) * aircraft.radius * aircraft.angularSpeed);
+    aircraft.previousPosition = aircraft.position;
+    aircraft.evading = true;
+    aircraft.maneuverPhase = RandomFloat(0.0f, PI * 2.0f);
+    GenerateEvadingWaypoints(&aircraft);
+    aircraft.waypointIndex = 0;
+    return aircraft;
+}
+
 static void UpdateAircraft(Aircraft *aircraft, float dt)
 {
     aircraft->previousPosition = aircraft->position;
-    aircraft->angle += aircraft->angularSpeed * dt;
-    aircraft->position = V3(aircraft->center.x + cosf(aircraft->angle) * aircraft->radius,
-                            aircraft->altitude,
-                            aircraft->center.z + sinf(aircraft->angle) * aircraft->radius);
-    aircraft->velocity = V3(-sinf(aircraft->angle) * aircraft->radius * aircraft->angularSpeed,
-                            0.0f,
-                            cosf(aircraft->angle) * aircraft->radius * aircraft->angularSpeed);
+
+    if (aircraft->evading) {
+        Vector3 target = aircraft->waypoints[aircraft->waypointIndex];
+        Vector3 toTarget = Vector3Subtract(target, aircraft->position);
+        float dist = Vector3Length(toTarget);
+
+        if (dist < 350.0f) {
+            aircraft->waypointIndex = (aircraft->waypointIndex + 1) % aircraft->waypointCount;
+            target = aircraft->waypoints[aircraft->waypointIndex];
+            toTarget = Vector3Subtract(target, aircraft->position);
+        }
+
+        Vector3 desiredDir = Vector3Normalize(toTarget);
+
+        aircraft->maneuverPhase += dt * 1.8f;
+        Vector3 up = V3(0.0f, 1.0f, 0.0f);
+        float weave = sinf(aircraft->maneuverPhase) * 0.55f;
+        desiredDir = RotateAroundAxis(desiredDir, up, weave);
+
+        float climbDive = sinf(aircraft->maneuverPhase * 0.7f + 1.0f) * 0.35f;
+        desiredDir.y += climbDive;
+        desiredDir = Vector3Normalize(desiredDir);
+
+        Vector3 currentDir = Vector3Normalize(aircraft->velocity);
+        if (Vector3Length(currentDir) < 0.001f) currentDir = desiredDir;
+
+        float maxTurn = 0.55f * dt;
+        Vector3 newDir = RotateVectorToward(currentDir, desiredDir, maxTurn);
+
+        float speed = Vector3Length(aircraft->velocity);
+        speed = ClampFloat(speed + RandomFloat(-0.5f, 0.5f) * dt, 200.0f, 295.0f);
+
+        aircraft->velocity = Vector3Scale(newDir, speed);
+        aircraft->position = Vector3Add(aircraft->position, Vector3Scale(aircraft->velocity, dt));
+        aircraft->altitude = aircraft->position.y;
+    } else {
+        aircraft->angle += aircraft->angularSpeed * dt;
+        aircraft->position = V3(aircraft->center.x + cosf(aircraft->angle) * aircraft->radius,
+                                aircraft->altitude,
+                                aircraft->center.z + sinf(aircraft->angle) * aircraft->radius);
+        aircraft->velocity = V3(-sinf(aircraft->angle) * aircraft->radius * aircraft->angularSpeed,
+                                0.0f,
+                                cosf(aircraft->angle) * aircraft->radius * aircraft->angularSpeed);
+    }
 }
 
 static Vector3 PredictInterceptPoint(Vector3 shooter, Vector3 target, Vector3 targetVelocity, float missileSpeed, float *timeOut)
@@ -748,7 +827,7 @@ static void DrawRadarScreen(Aircraft *aircrafts, int count, int selected, Vector
         int bx = (int)(RADAR_X + rx);
         int by = (int)(RADAR_Y + ry);
 
-        Color blipColor = (i == selected) ? RED : GREEN;
+        Color blipColor = (i == selected) ? RED : (aircrafts[i].evading ? ORANGE : GREEN);
         int radius = (i == selected) ? 5 : 3;
         DrawCircle(bx, by, radius, blipColor);
         if (i == selected) {
@@ -760,6 +839,8 @@ static void DrawRadarScreen(Aircraft *aircrafts, int count, int selected, Vector
 
     DrawText("RADAR", RADAR_X - 28, RADAR_Y - RADAR_R - 18, 16, Fade(GREEN, 0.9f));
     DrawText("TAB: cycle target", RADAR_X - 55, RADAR_Y + RADAR_R + 6, 14, Fade(RAYWHITE, 0.7f));
+    DrawText("N", RADAR_X + RADAR_R + 8, RADAR_Y - 6, 12, GREEN);
+    DrawText("E", RADAR_X + RADAR_R + 8, RADAR_Y + 8, 12, ORANGE);
 }
 
 static void DrawHud(SimPhase phase, bool paused, float timeScale, Aircraft aircraft, Missile missile, float interceptTime,
@@ -855,7 +936,8 @@ int main(void)
     };
 
     Aircraft aircrafts[MAX_AIRCRAFT];
-    for (int i = 0; i < MAX_AIRCRAFT; i++) aircrafts[i] = SpawnAircraft();
+    for (int i = 0; i < MAX_AIRCRAFT / 2; i++) aircrafts[i] = SpawnAircraft();
+    for (int i = MAX_AIRCRAFT / 2; i < MAX_AIRCRAFT; i++) aircrafts[i] = SpawnEvadingAircraft();
     int selectedAircraft = 0;
     Missile missile = {
         .position = LAUNCH_POS,
@@ -986,7 +1068,8 @@ int main(void)
                                                             aircrafts[selectedAircraft].previousPosition, aircrafts[selectedAircraft].position);
             if (distanceToTarget < 75.0f) {
                 explosionPosition = aircrafts[selectedAircraft].position;
-                aircrafts[selectedAircraft] = SpawnAircraft();
+                bool wasEvading = aircrafts[selectedAircraft].evading;
+                aircrafts[selectedAircraft] = wasEvading ? SpawnEvadingAircraft() : SpawnAircraft();
                 phase = PHASE_HIT;
                 missile.active = false;
                 resultTimer = 0.0f;
